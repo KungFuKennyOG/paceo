@@ -1,0 +1,19 @@
+{
+  "name": "paceo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "test": "pnpm -r test",
+    "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
+    "spike:push": "tsx scripts/spike-push-workout.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
