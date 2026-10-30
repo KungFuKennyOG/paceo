@@ -94,6 +94,7 @@ export const RecentResult = z.object({
   date: LocalDate,
   kind: z.enum(["race", "time_trial"]),
 });
+export type RecentResult = z.infer<typeof RecentResult>;
 
 export const CrossTraining = z.object({
   /** e.g. "cycling", "swimming", "paddling", "team_sport", "hiking", "lifting", "hiit", "other" (§10.2) */
@@ -186,6 +187,7 @@ export const EnginePlanJson = z.object({
 }).passthrough();
 
 export const PlanPreviewRequest = z.object({ profile: Profile });
+export type PlanPreviewRequest = z.infer<typeof PlanPreviewRequest>;
 export const PlanResponse = z.object({
   planId: z.string(),
   generatedAt: Timestamp,
@@ -204,6 +206,7 @@ export type PlanPreviewResponse = z.infer<typeof PlanPreviewResponse>;
 
 // ---------- workouts (§3.7, §11.3, §11.4) ----------
 export const WorkoutStatus = z.enum(["planned", "completed", "partial", "missed", "skipped"]);
+export type WorkoutStatus = z.infer<typeof WorkoutStatus>;
 export const SinkState = z.object({
   provider: z.literal("intervals_icu").nullable(),
   externalId: z.string().nullable(),
@@ -211,6 +214,7 @@ export const SinkState = z.object({
   lastPushedAt: Timestamp.nullable(),
   status: z.enum(["not_pushed", "pushed", "missing_on_readback", "error"]),
 });
+export type SinkState = z.infer<typeof SinkState>;
 
 export const ActivitySummary = z.object({
   id: z.string(),
@@ -256,6 +260,7 @@ export const SkipWorkoutRequest = z.object({
   reason: z.enum(["busy", "sick", "injured", "tired", "travel", "other"]),
   note: z.string().max(500).optional(),
 });
+export type SkipWorkoutRequest = z.infer<typeof SkipWorkoutRequest>;
 
 // ---------- check-ins (§8: R-ILL, R-PAIN, sRPE) ----------
 export const CheckInRequest = z.discriminatedUnion("type", [
@@ -304,15 +309,25 @@ export type CheckInResponse = z.infer<typeof CheckInResponse>;
 
 // ---------- activities & sync ----------
 export const ActivityListResponse = z.object({ items: z.array(ActivitySummary) });
+export type ActivityListResponse = z.infer<typeof ActivityListResponse>;
 export const SyncResponse = z.object({ queued: z.boolean(), jobId: z.string().nullable() });
+export type SyncResponse = z.infer<typeof SyncResponse>;
+
+/** Response of ROUTES.testWorkout (§2.5 step 8): the "Setup test" event pushed for tomorrow. */
+export const TestWorkoutResponse = z.object({ externalId: z.string(), date: LocalDate });
+export type TestWorkoutResponse = z.infer<typeof TestWorkoutResponse>;
 
 // ---------- push (§11.2) ----------
 export const VapidKeyResponse = z.object({ publicKey: z.string() });
+export type VapidKeyResponse = z.infer<typeof VapidKeyResponse>;
 export const PushSubscribeRequest = z.object({
   endpoint: z.string().url(),
   keys: z.object({ p256dh: z.string(), auth: z.string() }),
 });
 export type PushSubscribeRequest = z.infer<typeof PushSubscribeRequest>;
+/** Body of ROUTES.pushUnsubscribe. */
+export const PushUnsubscribeRequest = z.object({ endpoint: z.string().url() });
+export type PushUnsubscribeRequest = z.infer<typeof PushUnsubscribeRequest>;
 
 /**
  * Route table (method, path, request schema, response schema). The API registers exactly these;
@@ -331,7 +346,7 @@ export const ROUTES = {
   connectIntervals: { method: "POST", path: "/api/connections/intervals" }, // ConnectIntervalsRequest → ConnectionStatus
   disconnectIntervals: { method: "DELETE", path: "/api/connections/intervals" }, // → 204 (deletes key)
   connectionStatus: { method: "GET", path: "/api/connections/intervals" }, // → ConnectionStatus
-  testWorkout: { method: "POST", path: "/api/connections/intervals/test-workout" }, // → { externalId, date }
+  testWorkout: { method: "POST", path: "/api/connections/intervals/test-workout" }, // → TestWorkoutResponse { externalId, date }
   deleteTestWorkout: { method: "DELETE", path: "/api/connections/intervals/test-workout" }, // → 204
   planPreview: { method: "POST", path: "/api/plan/preview" }, // PlanPreviewRequest → PlanPreviewResponse
   planGenerate: { method: "POST", path: "/api/plan/generate" }, // → PlanResponse (stores + pushes next 14 d)
@@ -346,5 +361,5 @@ export const ROUTES = {
   sync: { method: "POST", path: "/api/sync" }, // → SyncResponse
   vapidKey: { method: "GET", path: "/api/push/vapid-public-key" }, // → VapidKeyResponse
   pushSubscribe: { method: "POST", path: "/api/push/subscriptions" }, // PushSubscribeRequest → 204
-  pushUnsubscribe: { method: "DELETE", path: "/api/push/subscriptions" }, // { endpoint } → 204
+  pushUnsubscribe: { method: "DELETE", path: "/api/push/subscriptions" }, // PushUnsubscribeRequest { endpoint } → 204
 } as const;
