@@ -6,10 +6,10 @@
   "scripts": {
     "dev": "vite",
     "dev:mock": "VITE_MOCK=1 vite",
-    "build": "vite build",
+    "build": "node scripts/ci-run.mjs \"web build\" vite build",
     "preview": "vite preview",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "test": "node scripts/ci-run.mjs \"web test\" vitest run",
+    "typecheck": "node scripts/ci-run.mjs \"web typecheck\" tsc --noEmit -p tsconfig.json --pretty false"
   },
   "dependencies": {
     "@paceo/contracts": "workspace:*",
