@@ -65,7 +65,21 @@ echo "▶ invite + register"
 INVITE=$(docker compose exec -T api node dist/cli/create-invite.js | sed -n 's/^Invite code: *//p')
 [ -n "$INVITE" ] || { echo "no invite code" >&2; exit 1; }
 
-post() { curl -fsS -b "$JAR" -c "$JAR" -H 'content-type: application/json' -X "$1" "$BASE$2" ${3:+-d "$3"}; }
+# method path [json-body] → prints the response body; fails (showing the body) on a non-2xx status.
+post() {
+  local out code
+  out=$(mktemp)
+  if [ -n "${3:-}" ]; then
+    code=$(curl -sS -o "$out" -w '%{http_code}' -b "$JAR" -c "$JAR" -H 'content-type: application/json' -X "$1" "$BASE$2" -d "$3")
+  else
+    code=$(curl -sS -o "$out" -w '%{http_code}' -b "$JAR" -c "$JAR" -X "$1" "$BASE$2")
+  fi
+  if [ "${code:0:1}" != 2 ]; then
+    echo "$1 $2 → HTTP $code: $(head -c 1500 "$out")" >&2
+    rm -f "$out"; return 1
+  fi
+  cat "$out"; rm -f "$out"
+}
 
 post POST /api/auth/register "{\"inviteCode\":\"$INVITE\",\"email\":\"smoke@paceo.test\",\"password\":\"correct horse battery\",\"displayName\":\"Smoke\"}" >/dev/null
 post GET /api/me | grep -q '"isAdmin":true' || { echo "first user is not admin" >&2; exit 1; }
