@@ -288,9 +288,6 @@ route("DELETE", "/api/connections/intervals/test-workout", () => noContent());
 
 // ── plan ─────────────────────────────────────────────────────────────────────────────────────────
 function previewFor(profile: Profile): TransportResponse {
-  if (profile.goal.type !== "race") {
-    return fail(422, "not_supported", "General-fitness plans aren't available in the mock backend yet.");
-  }
   const r = buildPlanResponse(profile, today(), new Date());
   if (!r) return fail(422, "preview_failed", "Couldn't build a preview for that profile.");
   return json(200, { plan: r.plan, paces: r.paces });
@@ -307,7 +304,7 @@ route("POST", "/api/plan/generate", () => {
   if (!a.profile) return fail(409, "no_profile", "Finish your profile first.");
   if (!a.screening?.canProceed) return fail(409, "screening_required", "Complete the health screen first.");
   const now = new Date();
-  const plan = buildPlanResponse(a.profile, today(), now, `plan_${Date.now().toString(36)}`);
+  const plan = buildPlanResponse(a.profile, today(), now, `plan_${Date.now().toString(36)}`, a.screening.outcome === "cleared_conservative");
   if (!plan) return fail(422, "plan_failed", "Couldn't build a plan for that profile.");
   if (plan.plan.feasibility.status === "block") return fail(422, "infeasible", "This goal is blocked. Pick one of the suggested alternatives.");
   a.plan = plan;

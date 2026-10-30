@@ -2,7 +2,7 @@ import { Link, useNavigate } from "react-router";
 import type { Feasibility, Plan } from "@paceo/engine";
 import { usePlan, useToday, useUnits } from "../api/hooks";
 import { FeasibilityPanel } from "../components/Feasibility";
-import { PaceTable, PHASE_NAMES, PhaseLegend, PhaseStrip, PlanSummaryStats, WeeklyBars } from "../components/PlanViews";
+import { ConflictList, PaceTable, PHASE_NAMES, PhaseLegend, PhaseStrip, PlanSummaryStats, WeeklyBars } from "../components/PlanViews";
 import { Empty, ErrorState, Skeleton } from "../components/States";
 import { addDays, formatDay } from "../lib/dates";
 import { formatKm } from "../lib/units";
@@ -64,6 +64,8 @@ export function PlanScreen() {
           <PhaseLegend weeks={weeks} />
         </section>
       )}
+
+      <ConflictList conflicts={plan.summary?.conflicts} />
 
       {feas && feas.status !== "ok" && (
         <section className="card">

@@ -1,6 +1,7 @@
 import { Link, useSearchParams } from "react-router";
 import type { ActivitySummary, WorkoutItem } from "@paceo/contracts";
-import { useActivities, useProfile, useToday, useUnits, useWorkouts } from "../api/hooks";
+import { weeklyLoad, type CrossTrainingSession, type Plan, type PlannedWorkout, type WeeklyLoad } from "@paceo/engine";
+import { useActivities, usePlan, useProfile, useToday, useUnits, useWorkouts } from "../api/hooks";
 import { WorkoutRow } from "../components/WorkoutCard";
 import { ActivityLine } from "../components/WorkoutBits";
 import { ErrorState, Skeleton } from "../components/States";
@@ -30,6 +31,12 @@ export function WeekScreen() {
   const end = addDays(start, 6);
   const workouts = useWorkouts(start, end);
   const activities = useActivities(start, end);
+  const plan = usePlan();
+  const planWeeks = (plan.data?.plan as unknown as Plan | undefined)?.weeks ?? [];
+  const planHasXt = planWeeks.some((w) => Array.isArray(w.crossTraining));
+  const xtSessions: CrossTrainingSession[] = planWeeks
+    .flatMap((w) => w.crossTraining ?? [])
+    .filter((x) => x.date >= start && x.date <= end);
 
   const items = workouts.data?.items ?? [];
   const acts = activities.data?.items ?? [];
@@ -44,6 +51,14 @@ export function WeekScreen() {
     if (i.matchedActivity?.distanceM) actualM += i.matchedActivity.distanceM;
   }
   for (const a of extraActs) if (isRunSport(a.sport) && a.distanceM) actualM += a.distanceM;
+
+  let load: WeeklyLoad | null = null;
+  try {
+    const ws = items.map((i) => i.workout as unknown as PlannedWorkout).filter((w) => w.planned && typeof w.planned.minutes === "number");
+    if (ws.length > 0 || xtSessions.length > 0) load = weeklyLoad({ workouts: ws, crossTraining: xtSessions });
+  } catch {
+    load = null;
+  }
 
   const shift = (weeks: number) => setParams({ start: addDays(start, 7 * weeks) });
   const isThisWeek = start === mondayOf(today);
@@ -83,6 +98,8 @@ export function WeekScreen() {
         </div>
       </div>
 
+      {load && load.totalLoad > 0 && <LoadBar load={load} />}
+
       {(workouts.isPending || activities.isPending) && <Skeleton height={360} />}
       {workouts.isError && <ErrorState error={workouts.error} onRetry={() => void workouts.refetch()} />}
       {activities.isError && <ErrorState error={activities.error} title="Couldn't load activities" onRetry={() => void activities.refetch()} />}
@@ -93,8 +110,10 @@ export function WeekScreen() {
             const date = addDays(start, idx);
             const dayItems = items.filter((i) => i.date === date);
             const dayActs = extraActs.filter((a) => a.localDate === date);
-            const plannedXt = (profile?.crossTraining ?? []).filter((c) => c.days.includes(wd));
-            const empty = dayItems.length === 0 && dayActs.length === 0 && plannedXt.length === 0;
+            // Prefer the plan's cross-training sessions (§10.2); older plans fall back to the profile.
+            const dayXt = xtSessions.filter((x) => x.date === date);
+            const plannedXt = planHasXt ? [] : (profile?.crossTraining ?? []).filter((c) => c.days.includes(wd));
+            const empty = dayItems.length === 0 && dayActs.length === 0 && plannedXt.length === 0 && dayXt.length === 0;
             return (
               <section key={date} className={`day ${date === today ? "day--today" : ""}`} aria-label={formatDay(date)} data-testid="week-day">
                 <div className="day__date">
@@ -105,6 +124,16 @@ export function WeekScreen() {
                   {empty && <span className="small muted">Rest</span>}
                   {dayItems.map((i) => (
                     <DayWorkout key={i.id} item={i} units={units} />
+                  ))}
+                  {dayXt.map((x) => (
+                    <span key={`${x.activity}-${x.date}`} className="small" data-testid="xt-session">
+                      <span className="pill tone-other">{x.name || activityLabel(x.activity)}</span>{" "}
+                      <span className="muted">
+                        {formatMinutes(x.minutes)}
+                        {x.hard ? " · hard" : " · easy"}
+                        {x.locked ? " · fixed" : ""}
+                      </span>
+                    </span>
                   ))}
                   {plannedXt.map((c) => (
                     <span key={c.activity} className="small">
@@ -147,6 +176,38 @@ function ExtraActivity({ a, units }: { a: ActivitySummary; units: ReturnType<typ
         <span className="badge badge--ok">Done</span>
       </span>
       <ActivityLine activity={a} units={units} />
+    </div>
+  );
+}
+
+/** Total load (sRPE × min) split by runs, strength and cross-training (§10.1). */
+function LoadBar({ load }: { load: WeeklyLoad }) {
+  const total = Math.max(1, load.totalLoad);
+  const parts = [
+    { key: "run", label: "Running", v: load.byKind.run, color: "var(--tone-easy)" },
+    { key: "strength", label: "Strength", v: load.byKind.strength, color: "var(--tone-strength)" },
+    { key: "xt", label: "Cross-training", v: load.byKind.crossTraining, color: "var(--tone-long)" },
+  ].filter((p) => p.v > 0);
+  return (
+    <div className="card card--flat" data-testid="load-bar">
+      <div className="row row--between">
+        <span className="eyebrow">Planned load</span>
+        <span className="small num">{Math.round(load.totalLoad).toLocaleString()} AU</span>
+      </div>
+      <div className="phase-strip" style={{ height: 12 }} aria-hidden="true">
+        {parts.map((p) => (
+          <span key={p.key} style={{ flex: p.v / total, background: p.color }} />
+        ))}
+      </div>
+      <div className="legend">
+        {parts.map((p) => (
+          <span key={p.key}>
+            <i style={{ background: p.color }} /> {p.label} {Math.round((p.v / total) * 100)}%
+          </span>
+        ))}
+        <span>Key sessions {load.keySessions.toFixed(load.keySessions % 1 ? 1 : 0)}</span>
+      </div>
+      {load.crossTrainingShare > 0.4 && <span className="tiny muted">Cross-training is over 40% of your load, so cutbacks come every third week.</span>}
     </div>
   );
 }

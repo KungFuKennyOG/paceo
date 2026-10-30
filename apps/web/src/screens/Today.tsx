@@ -16,7 +16,9 @@ export function TodayScreen() {
   const items = list.data?.items ?? [];
   const todays = items.filter((i) => i.date === today);
   const next = items.find((i) => i.date > today);
-  const raceDate = (plan.data?.plan as unknown as Plan | undefined)?.summary?.raceDate;
+  const summary = (plan.data?.plan as unknown as Plan | undefined)?.summary;
+  // General-fitness plans have no race: summary.raceDate is just the plan's last day.
+  const raceDate = summary?.mode === "general_fitness" ? undefined : summary?.raceDate;
   let daysOut: number | null = null;
   try {
     daysOut = typeof raceDate === "string" ? daysBetween(today, raceDate) : null;

@@ -7,15 +7,20 @@ import type { Profile } from "@paceo/contracts";
 import {
   checkFeasibility,
   computeVdot,
+  generalFitnessAsRaceInput,
   generatePlan,
+  isGeneralFitness,
   planPaces,
   trainingPaces,
   type Feasibility,
+  type GeneralFitnessInput,
   type Level,
   type LockedEvent,
   type PaceSet,
   type Plan,
   type PlanInput,
+  type PlanRequest,
+  type StrengthConfig,
   type TrainingPaces,
 } from "@paceo/engine";
 import { ageFromBirthYear } from "./dates";
@@ -45,18 +50,26 @@ export function heavyCrossTraining(p: Profile): boolean {
   return total > 0 && xt / total > 0.4;
 }
 
+/** Every cross-training entry, per weekday (§10.2). Flexible ones are passed with locked=false. */
 export function lockedEvents(p: Profile): LockedEvent[] {
-  return p.crossTraining
-    .filter((c) => c.locked)
-    .flatMap((c) =>
-      c.days.map((weekday) => ({
-        weekday,
-        activity: c.activity,
-        minutes: c.typicalMinutes,
-        srpe: c.typicalSrpe,
-        hard: c.typicalSrpe >= 7,
-      })),
-    );
+  return p.crossTraining.flatMap((c) =>
+    c.days.map((weekday) => ({
+      weekday,
+      activity: c.activity,
+      minutes: c.typicalMinutes,
+      srpe: c.typicalSrpe,
+      locked: c.locked,
+    })),
+  );
+}
+
+export function strengthConfig(p: Profile): StrengthConfig {
+  return {
+    mode: p.strength.mode,
+    equipment: p.strength.equipment,
+    sessionsPerWeek: p.strength.mode === "off" ? 0 : p.strength.sessionsPerWeek,
+    liftingExperience: p.strength.liftingExperience,
+  };
 }
 
 export interface VdotInfo {
@@ -78,21 +91,21 @@ export function vdotFromProfile(p: Pick<Profile, "recentResult">): VdotInfo | nu
 }
 
 export type PlanInputResult =
-  | { ok: true; input: PlanInput }
+  | { ok: true; input: PlanRequest }
   | { ok: false; reason: string };
 
-export function profileToPlanInput(p: Profile, today: string): PlanInputResult {
-  if (p.goal.type !== "race") {
-    return { ok: false, reason: "General-fitness previews come from the server." };
-  }
+export interface PlanInputOptions {
+  /** Screening outcome "cleared_conservative" (§2.4): no plyometrics, no heavy strength. */
+  conservative?: boolean;
+}
+
+export function profileToPlanInput(p: Profile, today: string, opts: PlanInputOptions = {}): PlanInputResult {
   const vd = vdotFromProfile(p);
-  const input: PlanInput = {
+  const base: Omit<PlanInput, "raceDate" | "goal"> = {
     level: effectiveLevel(p),
     runDays: p.daysAvailable.length,
     longRunDay: p.longRunDay,
     today,
-    raceDate: p.goal.raceDate,
-    goal: p.goal.goalTimeS ? { distance: p.goal.distance, timeS: p.goal.goalTimeS } : { distance: p.goal.distance },
     currentWeeklyKm: p.currentWeeklyKm,
     longestRun30d: { km: p.longestRun30d.km, minutes: p.longestRun30d.minutes },
     vdotStatus: vd ? vd.status : "none",
@@ -102,13 +115,30 @@ export function profileToPlanInput(p: Profile, today: string): PlanInputResult {
     canRun20MinContinuous: p.canRun20MinContinuous,
     monthsRunning: p.monthsRunning,
     lockedEvents: lockedEvents(p),
+    strength: strengthConfig(p),
+    conservative: opts.conservative ?? false,
   };
   if (vd) {
-    input.vdot = vd.vdot;
-    input.vdotAnchorM = vd.anchorM;
+    base.vdot = vd.vdot;
+    base.vdotAnchorM = vd.anchorM;
   }
-  if (p.birthYear !== null) input.age = ageFromBirthYear(p.birthYear, today);
+  if (p.birthYear !== null) base.age = ageFromBirthYear(p.birthYear, today);
+  if (p.goal.type === "general_fitness") {
+    const gf: GeneralFitnessInput = { ...base, goal: { type: "general_fitness" } };
+    if (p.goal.targetWeeklyMinutes !== null) gf.goal.targetWeeklyMinutes = p.goal.targetWeeklyMinutes;
+    return { ok: true, input: gf };
+  }
+  const input: PlanInput = {
+    ...base,
+    raceDate: p.goal.raceDate,
+    goal: p.goal.goalTimeS ? { distance: p.goal.distance, timeS: p.goal.goalTimeS } : { distance: p.goal.distance },
+  };
   return { ok: true, input };
+}
+
+/** The race-shaped input used for paces and feasibility (general fitness maps onto its reference distance). */
+export function raceShaped(input: PlanRequest): PlanInput {
+  return isGeneralFitness(input) ? generalFitnessAsRaceInput(input) : input;
 }
 
 export interface ClientPreview {
@@ -117,29 +147,35 @@ export interface ClientPreview {
 }
 
 /** Run the engine in the browser. Never throws: engine errors become a reason string. */
-export function clientPreview(p: Profile, today: string): { ok: true; preview: ClientPreview } | { ok: false; reason: string } {
-  const r = profileToPlanInput(p, today);
+export function clientPreview(
+  p: Profile,
+  today: string,
+  opts: PlanInputOptions = {},
+): { ok: true; preview: ClientPreview } | { ok: false; reason: string } {
+  const r = profileToPlanInput(p, today, opts);
   if (!r.ok) return r;
   try {
     const plan = generatePlan(r.input);
+    const race = raceShaped(r.input);
     const paceInput: Parameters<typeof planPaces>[0] = {
-      level: r.input.level,
-      vdotStatus: r.input.vdotStatus,
-      goal: r.input.goal,
-      longestRun30d: r.input.longestRun30d,
+      level: race.level,
+      vdotStatus: race.vdotStatus,
+      goal: { distance: race.goal.distance, ...(race.goal.timeS !== undefined ? { timeS: race.goal.timeS } : {}) },
+      longestRun30d: race.longestRun30d,
     };
-    if (r.input.vdot !== undefined) paceInput.vdot = r.input.vdot;
+    if (race.vdot !== undefined) paceInput.vdot = race.vdot;
     return { ok: true, preview: { plan, paces: planPaces(paceInput) } };
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : "The preview engine failed." };
   }
 }
 
-export function clientFeasibility(p: Profile, today: string): Feasibility | null {
-  const r = profileToPlanInput(p, today);
+/** Race mode: the §6.2 checks alone (fast). General fitness: the plan's own feasibility. */
+export function clientFeasibility(p: Profile, today: string, opts: PlanInputOptions = {}): Feasibility | null {
+  const r = profileToPlanInput(p, today, opts);
   if (!r.ok) return null;
   try {
-    return checkFeasibility(r.input);
+    return isGeneralFitness(r.input) ? generatePlan(r.input).feasibility : checkFeasibility(r.input);
   } catch {
     return null;
   }

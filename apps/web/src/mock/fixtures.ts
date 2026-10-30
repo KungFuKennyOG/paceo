@@ -88,73 +88,6 @@ export const disconnectedConnection: ConnectionStatus = {
   message: null,
 };
 
-const STRENGTH_EXERCISES = [
-  {
-    name: "Pogo hops",
-    slot: "PLYO",
-    sets: 3,
-    reps: "20",
-    rest_s: 60,
-    description: "Small, fast ankle bounces. Do these first, while you're fresh.",
-    cues: ["Stiff ankles, minimal knee bend", "Quick ground contact", "Land on the forefoot, quietly"],
-    common_faults: ["Sinking into the heels"],
-  },
-  {
-    name: "Heavy goblet squat",
-    slot: "SQUAT",
-    sets: 3,
-    reps: "6–8",
-    rpe: "7",
-    load_kg: 24,
-    rest_s: 120,
-    description: "Hold a DB at the chest; squat between the knees.",
-    cues: ["Feet shoulder-width, toes slightly out", "Knees track over toes", "Chest up, elbows inside knees", "Drive through mid-foot"],
-    common_faults: ["Heels lifting", "Knees caving in"],
-  },
-  {
-    name: "DB reverse lunge",
-    slot: "SINGLE_LEG",
-    sets: 3,
-    reps: "8/side",
-    rpe: "7",
-    load_kg: 12,
-    rest_s: 90,
-    cues: ["Step back long enough that the front shin stays near vertical", "Control 2–3 s down"],
-    common_faults: [],
-  },
-  {
-    name: "Single-leg DB calf raise",
-    slot: "CALF_STRAIGHT",
-    sets: 3,
-    reps: "8–12",
-    rpe: "8",
-    load_kg: 16,
-    rest_s: 60,
-    description: "On a step edge, full range.",
-    cues: ["Full stretch at the bottom", "Rise straight over the big toe", "2 s up, 2–3 s down"],
-    common_faults: ["Bouncing out of the bottom"],
-  },
-  { name: "Dead bug", slot: "CORE", sets: 2, reps: "8/side", cues: ["Lower back stays on the floor"], common_faults: [] },
-];
-
-function strengthWorkout(date: string): PlannedWorkout & { exercises: unknown[] } {
-  return {
-    id: `me-str-${date}`,
-    user_id: "me",
-    date,
-    sport: "strength",
-    type: "STRENGTH",
-    name: "Strength A: running-focused lower body",
-    phase: "EQ",
-    prescription_mode: "time_rpe",
-    steps: [],
-    planned: { run_m: 0, minutes: 45, expected_srpe: 6 },
-    flags: { heat_adjusted: false, key_session: false },
-    rule_trace: ["ST:running:A", "ST:dumbbells", "ST-7:48h_before_key"],
-    exercises: STRENGTH_EXERCISES,
-  };
-}
-
 /** A type the UI doesn't know yet: it must render gracefully. */
 function mobilityWorkout(date: string): Record<string, unknown> {
   return {
@@ -210,8 +143,8 @@ function activityFor(w: { id: string; date: string; name: string; planned: { run
   };
 }
 
-export function buildPlanResponse(profile: Profile, today: string, now: Date, planId = "plan_demo"): PlanResponse | null {
-  const r = clientPreview(profile, today);
+export function buildPlanResponse(profile: Profile, today: string, now: Date, planId = "plan_demo", conservative = false): PlanResponse | null {
+  const r = clientPreview(profile, today, { conservative });
   if (!r.ok) return null;
   return {
     planId,
@@ -238,11 +171,14 @@ export function workoutsForPlan(plan: Plan, today: string, now: Date, extras = t
       else if (pastIndex === 5) status = "skipped";
       else {
         status = "completed";
-        matched = activityFor(w, pastIndex);
-        activities.push(matched);
+        if (w.sport === "run") {
+          matched = activityFor(w, pastIndex);
+          activities.push(matched);
+        }
       }
     }
-    const missing = !missingMarked && w.date > addDays(today, 1) && w.date <= addDays(today, 5);
+    const isRun = w.sport === "run";
+    const missing = isRun && !missingMarked && w.date > addDays(today, 1) && w.date <= addDays(today, 5);
     if (missing) missingMarked = true;
     items.push({
       id: w.id,
@@ -250,26 +186,14 @@ export function workoutsForPlan(plan: Plan, today: string, now: Date, extras = t
       workout: w as unknown as WorkoutItem["workout"],
       status,
       matchedActivity: matched,
-      sink: sinkFor(w.date, today, now, missing),
+      sink: isRun ? sinkFor(w.date, today, now, missing) : { provider: null, externalId: null, eventId: null, lastPushedAt: null, status: "not_pushed" },
     });
   }
   if (extras && all.length > 0) {
     const start = all[0]!.date;
-    // Strength on Mondays and Fridays (non-run days in the demo profile) for the first three weeks.
-    for (let d = start; d <= addDays(start, 20); d = addDays(d, 1)) {
-      const wd = weekdayOf(d);
-      if (wd === "fri") {
-        const sw = strengthWorkout(d);
-        items.push({
-          id: sw.id,
-          date: d,
-          workout: sw as unknown as WorkoutItem["workout"],
-          status: d < today ? "completed" : "planned",
-          matchedActivity: null,
-          sink: { provider: null, externalId: null, eventId: null, lastPushedAt: null, status: "not_pushed" },
-        });
-      }
-      if (wd === "mon" && d < today) {
+    // Logged rides on Mondays (the demo profile's cross-training day).
+    for (let d = start; d < today; d = addDays(d, 1)) {
+      if (weekdayOf(d) === "mon") {
         activities.push({
           id: `act-ride-${d}`,
           source: "intervals_icu",

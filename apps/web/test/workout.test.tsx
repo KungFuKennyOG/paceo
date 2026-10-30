@@ -107,6 +107,33 @@ describe("workout steps: strength workout", () => {
   });
 });
 
+describe("workout steps: engine strength format (§9.3)", () => {
+  it("renders sets × reps text, load guidance, contacts and cues", () => {
+    const w = toViewWorkout({
+      id: "me-w03-2026-11-20-str",
+      date: "2026-11-20",
+      sport: "strength",
+      type: "STRENGTH",
+      name: "Strength: lower body A",
+      steps: [],
+      planned: { run_m: 0, minutes: 40, expected_srpe: 6 },
+      exercises: [
+        { id: "pogo", slot: "PLYO", name: "Pogo hops", sets: 2, reps: "10 contacts", load: "bodyweight", contacts: 20, cues: ["Stiff ankles"] },
+        { id: "rdl", slot: "HINGE", name: "Romanian deadlift", sets: 3, reps: "6–8", load: "RPE 7–8", rest_s: 120, cues: ["Push hips back"], note: "Alternate with squat" },
+      ],
+    });
+    render(<WorkoutBody w={w} units="metric" />);
+    const ex = screen.getAllByTestId("exercise");
+    expect(ex).toHaveLength(2);
+    expect(ex[0]).toHaveTextContent("2 × 10 contacts");
+    expect(ex[0]).toHaveTextContent("bodyweight · 20 contacts");
+    expect(ex[1]).toHaveTextContent("3 × 6–8");
+    expect(ex[1]).toHaveTextContent("RPE 7–8 · rest 2 min");
+    expect(ex[1]).toHaveTextContent("Push hips back");
+    expect(ex[1]).toHaveTextContent("Alternate with squat");
+  });
+});
+
 describe("unknown workout types", () => {
   it("render gracefully with a humanised label", () => {
     const odd = { id: "m1", date: "2026-11-19", sport: "mobility", type: "MOBILITY_FLOW", name: "Mobility", steps: [{ kind: "teleport" }], planned: { run_m: 0, minutes: 20 } };

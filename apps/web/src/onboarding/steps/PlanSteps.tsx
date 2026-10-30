@@ -4,7 +4,7 @@ import type { Profile } from "@paceo/contracts";
 import type { Alternative, Feasibility, Plan, Units } from "@paceo/engine";
 import { api } from "../../api/client";
 import { FeasibilityPanel } from "../../components/Feasibility";
-import { PaceTable, PhaseLegend, PhaseStrip, PlanSummaryStats, WeeklyBars } from "../../components/PlanViews";
+import { ConflictList, PaceTable, PhaseLegend, PhaseStrip, PlanSummaryStats, WeeklyBars } from "../../components/PlanViews";
 import { Loading } from "../../components/States";
 import { TypePill } from "../../components/WorkoutBits";
 import { clientFeasibility, clientPreview } from "../../lib/planInput";
@@ -64,7 +64,12 @@ export function ReviewStep({
   onStatus?: (s: Feasibility["status"] | null) => void;
 }) {
   const local = useMemo(() => (profile ? clientFeasibility(profile, today) : null), [profile, today]);
+  const localPlan = useMemo(() => {
+    const r = profile ? clientPreview(profile, today) : null;
+    return r && r.ok ? r.preview.plan : null;
+  }, [profile, today]);
   const server = useServerPreview(profile);
+  const conflicts = (server.data ? (server.data.plan as unknown as Plan).summary?.conflicts : undefined) ?? localPlan?.summary?.conflicts;
   const serverFeasibility = server.data ? (server.data.plan.feasibility as unknown as Feasibility) : null;
   const shown = serverFeasibility ?? local;
   const source = serverFeasibility ? "server" : "client";
@@ -86,6 +91,7 @@ export function ReviewStep({
   return (
     <div className="stack">
       <FeasibilityPanel feasibility={shown} onPick={onPick} selectedKind={selectedKind} source={source} />
+      <ConflictList conflicts={conflicts} />
       {server.isPending && <p className="tiny muted">Confirming with the server…</p>}
       {server.isError && <p className="tiny muted">Server check unavailable right now; showing the on-device check.</p>}
     </div>
@@ -100,6 +106,7 @@ export function PlanPreviewBody({ plan, paces, units, today, showWorkouts = true
   return (
     <div className="stack stack--loose">
       <PlanSummaryStats plan={plan} units={units} today={today} />
+      <ConflictList conflicts={plan.summary?.conflicts} />
       <div className="card card--flat">
         <span className="eyebrow">Weekly volume</span>
         <WeeklyBars weeks={plan.weeks} units={units} />

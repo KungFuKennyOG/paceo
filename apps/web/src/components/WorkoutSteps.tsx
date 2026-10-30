@@ -3,6 +3,7 @@ import type { Units } from "@paceo/engine";
 import {
   describeDuration,
   describeTarget,
+  exerciseLoadLine,
   exercisePrescription,
   isRepeatStep,
   stepLabel,
@@ -72,6 +73,8 @@ export function ExerciseList({ exercises, units }: { exercises: Exercise[]; unit
           </>
         );
         const meta: string[] = [];
+        const loadLine = exerciseLoadLine(ex);
+        if (loadLine) meta.push(loadLine);
         if (ex.loadKg !== undefined) meta.push(formatLoad(ex.loadKg, units, ex.loadKg < 20));
         if (ex.restS !== undefined) meta.push(`rest ${formatSeconds(ex.restS)}`);
         return (

@@ -24,6 +24,10 @@ export interface Exercise {
   durationS?: number;
   rpe?: string;
   loadKg?: number;
+  /** Load guidance as text from the engine, e.g. "RPE 8 (~85% 1RM)". */
+  loadText?: string;
+  /** Plyometrics: foot contacts for the whole exercise (§9.5). */
+  contacts?: number;
   restS?: number;
   description?: string;
   cues: string[];
@@ -84,6 +88,10 @@ export function parseExercise(raw: unknown): Exercise | null {
   if (typeof rpeRaw === "number" || typeof rpeRaw === "string") ex.rpe = String(rpeRaw);
   const load = num(pick(raw, "load_kg", "loadKg", "weight_kg"));
   if (load !== undefined) ex.loadKg = load;
+  const loadText = str(pick(raw, "load"));
+  if (loadText) ex.loadText = loadText;
+  const contacts = num(pick(raw, "contacts"));
+  if (contacts !== undefined) ex.contacts = contacts;
   const rest = num(pick(raw, "rest_s", "restS"));
   if (rest !== undefined) ex.restS = rest;
   const desc = str(pick(raw, "description", "desc"));
@@ -309,4 +317,12 @@ export function exercisePrescription(ex: Exercise): string {
   else if (ex.sets !== undefined) parts.push(`${ex.sets} sets`);
   if (ex.rpe) parts.push(`RPE ${ex.rpe}`);
   return parts.join(" @ ");
+}
+
+/** Secondary line: load guidance, plyo contacts. */
+export function exerciseLoadLine(ex: Exercise): string | null {
+  const parts: string[] = [];
+  if (ex.loadText) parts.push(ex.loadText);
+  if (ex.contacts !== undefined) parts.push(`${ex.contacts} contacts`);
+  return parts.length ? parts.join(" · ") : null;
 }

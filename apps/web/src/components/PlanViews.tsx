@@ -1,4 +1,4 @@
-import type { Plan, PlanWeek, PaceSet, Units } from "@paceo/engine";
+import type { Plan, PlanWeek, PaceSet, ScheduleConflict, Units } from "@paceo/engine";
 import { daysBetween, formatDate } from "../lib/dates";
 import { formatKm, formatPaceRange, kmToUnit, distanceUnit } from "../lib/units";
 
@@ -102,10 +102,19 @@ export function PhaseStrip({ weeks }: { weeks: PlanWeek[] }) {
   );
 }
 
-/** Summary card: race date, countdown, peak week, peak long run (§2.1). Tolerates partial summaries. */
+export function isGeneralFitnessPlan(plan: Plan): boolean {
+  return plan.summary?.mode === "general_fitness";
+}
+
+/**
+ * Summary card: race date, countdown, peak week, peak long run (§2.1). Tolerates partial summaries.
+ * General-fitness plans have no race: they show the end date and no countdown.
+ */
 export function PlanSummaryStats({ plan, units, today }: { plan: Plan; units: Units; today: string }) {
   const s = plan.summary ?? ({} as Plan["summary"]);
-  const raceDate = typeof s.raceDate === "string" ? s.raceDate : null;
+  const gf = isGeneralFitnessPlan(plan);
+  const raceDate = !gf && typeof s.raceDate === "string" ? s.raceDate : null;
+  const endDate = gf ? (typeof s.endDate === "string" ? s.endDate : typeof s.raceDate === "string" ? s.raceDate : null) : null;
   let daysOut: number | null = null;
   if (raceDate) {
     try {
@@ -132,11 +141,46 @@ export function PlanSummaryStats({ plan, units, today }: { plan: Plan; units: Un
           </div>
         </div>
       )}
+      {gf && (
+        <div className="row row--between" style={{ alignItems: "flex-end" }}>
+          <div>
+            <div className="eyebrow">General fitness</div>
+            <div className="num" style={{ fontSize: "1.3rem" }}>
+              {endDate ? `Block ends ${formatDate(endDate)}` : "Rolling blocks"}
+            </div>
+          </div>
+        </div>
+      )}
       <div className="stats">
         <Stat label="Weeks" value={String(s.weeks ?? plan.weeks.length)} />
         <Stat label="Peak week" value={typeof s.peakWeekKm === "number" ? formatKm(s.peakWeekKm, units, 0) : "—"} />
         <Stat label="Peak long run" value={typeof s.peakLongRunKm === "number" ? formatKm(s.peakLongRunKm, units, 1) : "—"} />
       </div>
+    </div>
+  );
+}
+
+const WEEKDAY_NAMES: Record<string, string> = { mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday" };
+
+/** Locked-session conflicts and the engine's suggested fixes (§7.1 fallbacks 5–6, §9.6). */
+export function ConflictList({ conflicts }: { conflicts: ScheduleConflict[] | undefined }) {
+  if (!conflicts || conflicts.length === 0) return null;
+  return (
+    <div className="banner banner--warn" data-testid="conflicts">
+      <strong>Schedule conflicts</strong>
+      <ul>
+        {conflicts.map((c) => (
+          <li key={`${c.code}-${c.weekday}`}>
+            <span>{c.message}</span>
+            <span className="tiny muted">
+              {" "}
+              ({WEEKDAY_NAMES[c.weekday] ?? c.weekday}
+              {c.weeks.length > 0 ? `, week${c.weeks.length > 1 ? "s" : ""} ${c.weeks.join(", ")}` : ""})
+            </span>
+            {c.suggestion && <div className="small">Try: {c.suggestion}</div>}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

@@ -8,7 +8,7 @@ import { qk, setMeProfile, useConnection, useInvalidatePlanData, useMe, usePlan,
 import { ChoiceGroup, Field } from "../components/Form";
 import { FeasibilityPanel } from "../components/Feasibility";
 import { FitUpload } from "../components/FitUpload";
-import { Stat } from "../components/PlanViews";
+import { ConflictList, Stat } from "../components/PlanViews";
 import { ErrorState, InlineError, Skeleton } from "../components/States";
 import { formatDate, timeAgo } from "../lib/dates";
 import { clientFeasibility } from "../lib/planInput";
@@ -182,6 +182,7 @@ function ProfileEditor({ profile, onClose }: { profile: Profile; onClose: () => 
               }}
             />
           )}
+          <ConflictList conflicts={serverPlan?.summary?.conflicts} />
           {serverPlan && serverPlan.weeks.length > 0 && (
             <div className="stats">
               <Stat label="Weeks" value={String(serverPlan.weeks.length)} />

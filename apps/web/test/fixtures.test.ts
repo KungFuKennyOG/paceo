@@ -52,8 +52,8 @@ describe("mock fixtures parse against the contract schemas", () => {
       expect(() => WorkoutItem.parse(item)).not.toThrow();
       expect(() => WorkoutDetailResponse.parse(detailFor(item))).not.toThrow();
       const w = item.workout as Record<string, unknown>;
-      // Engine-generated run workouts also satisfy the engine's own DSL schema.
-      if (w.sport === "run") expect(PlannedWorkoutSchema.safeParse(w).success).toBe(true);
+      // Engine-generated workouts (runs and strength) also satisfy the engine's own DSL schema.
+      if (w.type !== "MOBILITY") expect(PlannedWorkoutSchema.safeParse(w).success, String(w.id)).toBe(true);
     }
     expect(() => ActivityListResponse.parse({ items: data.activities })).not.toThrow();
     expect(data.activities.some((a) => a.garminOrigin)).toBe(true);
