@@ -4,6 +4,8 @@
  */
 import type { Weekday } from "./dates.js";
 import type { PlannedWorkout } from "./workout.js";
+import type { StrengthConfig } from "./strength.js";
+import type { CrossTrainingSession } from "./cross-training.js";
 import { DISTANCES_M } from "./vdot.js";
 
 export type Level = "beginner" | "novice" | "intermediate" | "advanced";
@@ -22,15 +24,61 @@ export const GOAL_DISTANCE_M: Record<GoalDistance, number> = {
 };
 
 /**
- * Cross-training or external lifting on fixed days (§7.1 step 1, §10.2).
- * TODO(§10, §7.1): accepted but not scheduled yet; hard sessions should count as ½ key session (§6.4).
+ * Cross-training or external lifting on a fixed weekday, every week of the plan (§7.1 step 1, §9.6, §10.2).
+ * Classified per §10.2 by `activity` (cross-training.ts). Race day itself never carries one (D).
  */
 export interface LockedEvent {
   weekday: Weekday;
+  /**
+   * §10.2 activity: a class id ("cycling", "paddling", "team_sport", "hiit", "strength_upper", …),
+   * a common name ("dragon boat", "soccer", "crossfit") or an intervals.icu sport type ("Ride",
+   * "Rowing", "WeightTraining"). Unknown values fall into "other".
+   */
   activity: string;
   minutes: number;
-  srpe: number;
-  hard: boolean;
+  /** Expected session RPE (CR-10). Defaults to the §10.2 easy value, or the hard value when `hard`. */
+  srpe?: number;
+  /**
+   * The user's own hard/easy call. When absent it is derived (§10.2): sRPE ≥ 7 (climbing ≥ 8),
+   * team sports and HIIT always hard, hikes > 3 h with > 800 m gain hard.
+   * `false` on a team sport = "light/technique".
+   */
+  hard?: boolean;
+  /** Locked (default) sessions are never moved; flexible ones may get a "move it" suggestion (§10.2, §7.1 fallback 5). */
+  locked?: boolean;
+  /** Display name, e.g. "Club paddling". */
+  name?: string;
+  /** Hikes only: elevation gain in metres, for the "> 3 h with > 800 m" hard rule. */
+  elevationGainM?: number;
+}
+
+/** §6.1 plan modes. "beginner ladder" isn't a separate mode: it is the opening weeks of either. */
+export type PlanMode = "race" | "general_fitness";
+
+/** Race goal (the original PlanInput goal). `type` is optional so existing `{ distance }` literals still compile. */
+export interface RaceGoal {
+  type?: "race";
+  distance: GoalDistance;
+  timeS?: number;
+}
+
+/**
+ * General fitness / base building (§6.1): rolling 4-week blocks, a weekly target time or volume,
+ * a TT every 6–8 weeks, no taper, no race.
+ */
+export interface GeneralFitnessGoal {
+  type: "general_fitness";
+  /** Weekly running time to build toward (minutes). Converted to km at E pace. */
+  targetWeeklyMinutes?: number;
+  /** Weekly running volume to build toward (km). Used when minutes aren't given. */
+  targetWeeklyKm?: number;
+  /** Weeks to generate from `today`. Default 12. */
+  weeks?: number;
+  /**
+   * Distance whose §6.5/§6.6 caps and P3 emphasis the plan borrows (D). Default: 10K for
+   * beginners and novices, half marathon otherwise.
+   */
+  referenceDistance?: GoalDistance;
 }
 
 export interface PlanInput {
@@ -44,7 +92,7 @@ export interface PlanInput {
   /** Local "today", YYYY-MM-DD. The engine never reads the clock. */
   today: string;
   raceDate: string;
-  goal: { distance: GoalDistance; timeS?: number };
+  goal: RaceGoal;
   currentWeeklyKm: number;
   /** Longest non-race run in the last 30 days (§6.1). Seeds the V1 reference. */
   longestRun30d: { km: number; minutes: number };
@@ -65,8 +113,25 @@ export interface PlanInput {
   monthsRunning: number;
   /** Run/walk ladder entry stage 1–10 from onboarding (§6.9). Defaults to 1. */
   ladderEntryStage?: number;
-  /** TODO(§10): accepted, not scheduled in this slice. */
+  /** Cross-training and external lifting on fixed weekdays (§7.1 step 1, §10.2). */
   lockedEvents?: readonly LockedEvent[];
+  /** §9.2 strength settings. Absent = off (the API applies the spec defaults, DEFAULT_STRENGTH_CONFIG). */
+  strength?: StrengthConfig;
+  /**
+   * Out-of-scope user continuing after professional guidance (§2.4: pregnancy/postpartum, recent
+   * serious injury or surgery): no plyometrics and no heavy strength work.
+   */
+  conservative?: boolean;
+}
+
+/** §6.1 general-fitness request: the race fields are replaced by a GeneralFitnessGoal. */
+export type GeneralFitnessInput = Omit<PlanInput, "raceDate" | "goal"> & { goal: GeneralFitnessGoal };
+
+/** Anything generatePlan accepts. PlanInput (race mode) is unchanged for existing callers. */
+export type PlanRequest = PlanInput | GeneralFitnessInput;
+
+export function isGeneralFitness(input: PlanRequest): input is GeneralFitnessInput {
+  return input.goal.type === "general_fitness";
 }
 
 export type FeasibilityStatus = "ok" | "warn" | "block";
@@ -116,7 +181,14 @@ export interface PlanWeek {
   isCutback: boolean;
   isTaper: boolean;
   isLadder: boolean;
+  /** Runs and app-prescribed strength (sport "strength"), by date; on a shared day the run comes first. */
   workouts: PlannedWorkout[];
+  /**
+   * Locked cross-training and external lifting that falls in this week (§7.1 step 1, §10.2). These
+   * aren't prescribed or pushed to a watch; they are listed so the week shows its full load.
+   * Always set by generatePlan (optional only so older Plan JSON still type-checks).
+   */
+  crossTraining?: CrossTrainingSession[];
   notes: string[];
   /** Set when planned km misses the target by more than 10%, with the caps that caused it. */
   volumeFlag?: VolumeFlag;
@@ -131,12 +203,30 @@ export interface VolumeFlag {
   reasons: string[];
 }
 
+/** A rule the week couldn't satisfy (§7.1 fallbacks 5–6, §9.6). Deduplicated per code and weekday in the summary. */
+export interface ScheduleConflict {
+  code: string;
+  /** Weekday of the session that causes it. */
+  weekday: Weekday;
+  /** Plan weeks (1-based) where it occurs. */
+  weeks: number[];
+  message: string;
+  /** A concrete fix, e.g. a weekday to move a flexible session or an external lifting day to. */
+  suggestion?: string;
+}
+
 export interface PlanSummary {
+  /** §6.1. Always set by generatePlan; absent in Plan JSON from before general-fitness mode. */
+  mode?: PlanMode;
+  /** Last day of the plan (race day in race mode). */
+  endDate?: string;
   weeks: number;
   /** Days between today and week 1 that the plan leaves unscheduled (weeks are aligned to end on race day). */
   leadInDays: number;
   startDate: string;
+  /** Race day. In general-fitness mode: the last day of the plan (same as endDate). */
   raceDate: string;
+  /** Goal distance; in general-fitness mode, the reference distance the caps come from. */
   distance: GoalDistance;
   phaseSplit: Record<Phase, number>;
   ladderWeeks: number;
@@ -149,6 +239,8 @@ export interface PlanSummary {
   totalKm: number;
   /** Weeks whose planned km is more than 10% off target (see PlanWeek.volumeFlag). */
   volumeFlags: VolumeFlag[];
+  /** Locked-session conflicts and fallback suggestions (§7.1 fallbacks 5–6). */
+  conflicts?: ScheduleConflict[];
   notes: string[];
 }
 

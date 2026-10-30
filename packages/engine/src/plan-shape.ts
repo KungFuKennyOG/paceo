@@ -3,7 +3,7 @@
  * so the reachability check simulates exactly the cutbacks and caps the generator will use.
  * Pure function of (input, number of weeks); no dates.
  */
-import type { GoalDistance, Level, Phase, PlanInput } from "./plan-types.js";
+import type { GeneralFitnessGoal, GoalDistance, Level, Phase, PlanInput } from "./plan-types.js";
 import { planPhases, type PlanPhases } from "./phases.js";
 import { taperMultipliers, taperWeeks as taperLength } from "./taper.js";
 import {
@@ -25,6 +25,7 @@ import {
   weekTemplate,
   type TemplateSlot,
 } from "./scheduler.js";
+import { generalFitnessKinds, generalFitnessPhases, generalFitnessTargetKm } from "./general-fitness.js";
 
 export type WeekKind = "ladder" | "build" | "cutback" | "tt" | "taper";
 
@@ -50,7 +51,7 @@ export interface PlanShape {
   capacityKm: number;
   /** Highest build-week target actually reached; taper multipliers apply to this. */
   buildPeakKm: number;
-  /** 1-based week of the 3K TT, if one is scheduled (§4.2 path A / §6.9 graduation). */
+  /** 1-based week of the (first) 3K TT, if one is scheduled (§4.2 path A / §6.9 graduation / §6.1 GF). */
   ttWeek?: number;
   paces: PaceSet;
   lrCaps: LongRunCaps;
@@ -98,16 +99,16 @@ export function slotMaxKm(paces: PaceSet): (slot: TemplateSlot) => number {
  * the LR sits at its time/distance cap. V3 alone can set a peak that the run days can't carry
  * (e.g. persona B at 4 days); capping the peak here keeps targets placeable and taper multipliers honest.
  */
-export function templateCapacityKm(level: Level, runDays: number, paces: PaceSet, caps: LongRunCaps): number {
+export function templateCapacityKm(level: Level, runDays: number, paces: PaceSet, caps: LongRunCaps, generalFitness = false): number {
   const lr = Math.min(caps.timeCapKm, caps.distanceCapKm);
   const easy = easyMaxKm(level, runDays, paces, lr);
   const perSlot = slotMaxKm(paces);
-  return weekTemplate(runDays)
+  return weekTemplate(runDays, { generalFitness })
     .filter((s) => s.role !== "L")
     .reduce((acc, s) => acc + Math.min(easy, perSlot(s)), lr);
 }
 
-function ladderKm(stage: number, paces: PaceSet): number {
+export function ladderKm(stage: number, paces: PaceSet): number {
   return (3 * ladderRunSeconds(stage)) / midPace(paces.E);
 }
 
@@ -198,4 +199,77 @@ function shapeWithTaper(input: PlanInput, weeks: number, taperRequested: number)
   if (ttWeek !== undefined) shape.ttWeek = ttWeek;
   if (startCap !== undefined) shape.startCap = startCap;
   return shape;
+}
+
+/**
+ * General-fitness shape (§6.1): optional run/walk ladder, then rolling blocks (general-fitness.ts)
+ * building from the entry volume toward the weekly target. No taper. `input` is the race-shaped
+ * internal input (generalFitnessAsRaceInput): its goal distance is the reference distance.
+ */
+export function generalFitnessShape(input: PlanInput, weeks: number, goal: GeneralFitnessGoal): PlanShape {
+  const trace: string[] = [];
+  const distance = input.goal.distance;
+  const paces = planPaces(input);
+  const entry = input.ladderEntryStage ?? 1;
+  const ladderWanted = input.level === "beginner" ? ladderWeeksNeeded(input.canRun20MinContinuous, entry) : 0;
+  const ladderWeeks = Math.max(0, Math.min(ladderWanted, weeks));
+  const ladderStages = Array.from({ length: ladderWeeks }, (_, i) => Math.min(LADDER_GRADUATION_STAGE, entry + i));
+  const buildCount = weeks - ladderWeeks;
+  const cutback = cutbackPolicy(input);
+  const buildKinds = generalFitnessKinds(buildCount, cutback.every, needsTimeTrial(input));
+  const byWeek = generalFitnessPhases(ladderWeeks, buildCount, cutback.every);
+
+  const runDays = effectiveRunDays(input.level, input.runDays);
+  const timeBased = prescriptionFor(input.level, input.vdotStatus, paces).longBy === "time";
+  const lrCaps = longRunCaps(input.level, distance, input.longRunMode, paces.LR, { timeBased, runDays });
+  const capacityKm = templateCapacityKm(input.level, runDays, paces, lrCaps, true);
+  const lastStage = ladderStages[ladderStages.length - 1];
+  const entryKm = Math.max(0, input.currentWeeklyKm, lastStage === undefined ? 0 : ladderKm(lastStage, paces));
+  const wantedKm = generalFitnessTargetKm(goal, midPace(paces.E));
+  let startKm = entryKm;
+  let startCap: string | undefined;
+  if (wantedKm !== undefined && wantedKm < startKm) {
+    startKm = wantedKm;
+    trace.push(`§6.1:target_below_current(${wantedKm.toFixed(1)}km)`);
+  }
+  if (startKm > capacityKm) {
+    startKm = capacityKm;
+    startCap = `V3:start_capped_to_run_days(${capacityKm.toFixed(1)}km)`;
+    trace.push(startCap);
+  }
+  const v3Peak = peakWeeklyKm(input.level, distance, startKm);
+  const goalKm = wantedKm === undefined ? v3Peak : Math.max(startKm, wantedKm);
+  const peakCapKm = Math.max(startKm, Math.min(goalKm, capacityKm));
+  if (peakCapKm < goalKm) trace.push(`V3:template_capacity(${capacityKm.toFixed(1)}km)`);
+  const buildTargets = buildWeekTargets(startKm, peakCapKm, buildKinds, CUTBACK_FLOOR_OF_ENTRY * startKm);
+  const buildPeakKm = Math.max(startKm, ...buildTargets);
+  const ttIdx = buildKinds.indexOf("tt");
+
+  const shape: PlanShape = {
+    weeks,
+    ladderWeeks,
+    ladderStages,
+    taperWeeks: 0,
+    phases: { base: 0, split: splitOf(byWeek), byWeek },
+    cutback,
+    kinds: [...Array<WeekKind>(ladderWeeks).fill("ladder"), ...buildKinds],
+    targets: [...ladderStages.map((st) => ladderKm(st, paces)), ...buildTargets],
+    startKm,
+    peakCapKm,
+    capacityKm,
+    buildPeakKm,
+    paces,
+    lrCaps,
+    l1TargetKm: l1CapKm(lrCaps, buildPeakKm, input.longestRun30d.km).km,
+    trace,
+  };
+  if (ttIdx >= 0) shape.ttWeek = ladderWeeks + ttIdx + 1;
+  if (startCap !== undefined) shape.startCap = startCap;
+  return shape;
+}
+
+function splitOf(byWeek: readonly Phase[]): PlanPhases["split"] {
+  const split = { FI: 0, EQ: 0, TQ: 0, FQ: 0 };
+  for (const p of byWeek) if (p !== "BASE") split[p] += 1;
+  return split;
 }

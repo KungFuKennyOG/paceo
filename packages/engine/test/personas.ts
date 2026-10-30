@@ -26,12 +26,18 @@ export const personaA: PlanInput = {
   longRunMode: "daniels",
   canRun20MinContinuous: true,
   monthsRunning: 2,
+  // §9.2: beginners get the bodyweight technique block whatever the settings.
+  strength: { mode: "running", equipment: "bodyweight", sessionsPerWeek: 2, liftingExperience: "none" },
 };
 
 /** A2: the same runner who can't yet run 20 min continuously → run/walk ladder from stage 6 (§4.3 weeks 1–3). */
 export const personaA2: PlanInput = { ...personaA, canRun20MinContinuous: false, ladderEntryStage: 6 };
 
-/** B: intermediate marathoner, 4 days, 40–45 km/week, 14 km longest run, 4:24 marathon → 4:15 goal. */
+/**
+ * B: intermediate marathoner, 4 days, 40–45 km/week, 14 km longest run, 4:24 marathon → 4:15 goal.
+ * Paddles twice a week (Thursday hard practice, Saturday easy) and lifts upper body on their own
+ * program Tuesday and Friday; the app adds running-focused lower A/B in the gym (§9.6).
+ */
 export const personaB: PlanInput = {
   level: "intermediate",
   runDays: 4,
@@ -50,6 +56,13 @@ export const personaB: PlanInput = {
   longRunMode: "daniels",
   canRun20MinContinuous: true,
   monthsRunning: 36,
+  lockedEvents: [
+    { weekday: "thu", activity: "dragon boat", minutes: 90, srpe: 7, name: "Dragon boat practice" },
+    { weekday: "sat", activity: "paddling", minutes: 75, srpe: 4, name: "Easy paddle" },
+    { weekday: "tue", activity: "strength_upper", minutes: 60, name: "Own upper-body lifting" },
+    { weekday: "fri", activity: "strength_upper", minutes: 60, name: "Own upper-body lifting" },
+  ],
+  strength: { mode: "running", equipment: "gym", sessionsPerWeek: 2, liftingExperience: "experienced" },
 };
 
 /** C: advanced, 6 days, 60–65 km/week, HM PR 1:31:31 (VDOT 50) → sub-1:30 in 14 weeks. */
@@ -70,4 +83,5 @@ export const personaC: PlanInput = {
   longRunMode: "daniels",
   canRun20MinContinuous: true,
   monthsRunning: 60,
+  strength: { mode: "full_body", equipment: "gym", sessionsPerWeek: 2, liftingExperience: "experienced" },
 };
