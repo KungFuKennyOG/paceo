@@ -1,16 +1,14 @@
 /**
  * Check-ins (spec §8: sRPE, R-ILL, R-PAIN, cross-training). Stored as the session log.
- * planChanges are applied changes only; guidance goes in `advice`.
- * TODO(engine-replan): hand illness/pain events to replan() instead of the simple skips below.
+ * Illness and pain run the engine's replan() at once (R-ILL / R-PAIN); sRPE and cross-training feed
+ * the nightly replan. planChanges are applied changes only; guidance and proposals go in `advice`.
  */
-import { addDays, type PlannedWorkout } from "@paceo/engine";
+import type { PlannedWorkout } from "@paceo/engine";
 import type { CheckInRequest, CheckInResponse } from "@paceo/contracts";
 import { activitiesRepo, checkinsRepo, workoutsRepo } from "../repo/index.js";
 import { AppError } from "../http/errors.js";
-import { localDate } from "../lib/time.js";
-import { JOB } from "../jobs/queue.js";
-import { userTimezone } from "./connection.js";
-import { dayName } from "./workouts.js";
+import type { CheckinLike } from "../plan/replan-state.js";
+import { runReplan } from "./plan.js";
 import type { Services } from "./context.js";
 
 export type PainZone = "green" | "amber" | "red";
@@ -22,22 +20,17 @@ export function painZone(duringRun: number, nextMorning: number | null): PainZon
   return "green";
 }
 
-/** Skips planned runs in [from, to] that are today or later; returns one sentence per change. */
-async function skipRuns(svc: Services, userId: string, from: string, to: string, reason: string, why: string): Promise<string[]> {
-  const today = localDate(svc.clock(), await userTimezone(svc, userId));
-  const start = from > today ? from : today;
-  if (start > to) return [];
-  const rows = await workoutsRepo.range(svc.db, userId, start, to);
-  const out: string[] = [];
-  let pushed = false;
-  for (const r of rows) {
-    if (r.status !== "planned" || r.sport !== "run") continue;
-    await workoutsRepo.setStatus(svc.db, userId, r.id, "skipped", reason);
-    out.push(`Removed ${dayName(r.date)}'s ${(r.workout as PlannedWorkout).name}: ${why}.`);
-    if ((r.sinkState as { externalId?: string | null } | null)?.externalId) pushed = true;
+/** Replan with this check-in included; returns the applied changes and any proposals. */
+async function replanWith(svc: Services, userId: string, req: CheckInRequest): Promise<{ changes: string[]; proposals: string[] }> {
+  const extra: CheckinLike = { type: req.type, date: req.date, activityId: null, workoutId: null, payload: req };
+  try {
+    const r = await runReplan(svc, userId, { reason: "replan_checkin", extra: [extra] });
+    return { changes: r.changes, proposals: r.proposals };
+  } catch (err) {
+    // The check-in is still recorded; the nightly replan retries with it.
+    svc.log.error({ userId, err }, "check-in replan failed");
+    return { changes: [], proposals: [] };
   }
-  if (pushed) await svc.jobs.enqueue(JOB.pushWorkouts, { userId }, { singletonKey: `push:${userId}`, singletonSeconds: 30 });
-  return out;
 }
 
 export async function recordCheckIn(svc: Services, userId: string, req: CheckInRequest): Promise<CheckInResponse> {
@@ -65,10 +58,10 @@ export async function recordCheckIn(svc: Services, userId: string, req: CheckInR
       break;
     }
     case "illness": {
+      const r = await replanWith(svc, userId, req);
+      planChanges.push(...r.changes);
+      advice.push(...r.proposals);
       if (req.fever || !req.aboveNeckOnly) {
-        planChanges.push(
-          ...(await skipRuns(svc, userId, req.date, addDays(req.date, 2), "sick", "no running with a fever or below-neck symptoms")),
-        );
         advice.push("No running until the fever and any below-neck symptoms are gone.");
         advice.push("Your first run back should be 10–20 minutes at an easy effort. Stop if you get chest pain, palpitations, dizziness or unusual breathlessness, and see a doctor.");
       } else {
@@ -79,15 +72,16 @@ export async function recordCheckIn(svc: Services, userId: string, req: CheckInR
     }
     case "pain": {
       const zone = painZone(req.duringRun, req.nextMorning);
+      if (zone !== "green") {
+        const r = await replanWith(svc, userId, req);
+        planChanges.push(...r.changes);
+        advice.push(...r.proposals);
+      }
       if (zone === "red") {
-        planChanges.push(
-          ...(await skipRuns(svc, userId, addDays(req.date, 1), addDays(req.date, 2), "injured", `${req.location} pain above the safe range`)),
-        );
         advice.push("Take 2–3 days off running, then try a 20–30 minute easy test run. If the pain goes above 5/10 again, see a physio.");
         advice.push("Sharp, localized bone pain can be a stress injury: stop running and see a doctor.");
       } else if (zone === "amber") {
         advice.push("Keep your next 2–3 runs easy and skip intervals, hills and plyometrics. Check how it feels tomorrow morning.");
-        // TODO(engine-replan): R-PAIN amber converts the next quality sessions to easy and freezes volume.
       } else {
         advice.push("That's within the safe range. Carry on, and log it again if it gets worse.");
       }

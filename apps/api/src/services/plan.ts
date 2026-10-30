@@ -1,12 +1,33 @@
 /**
- * Plan preview / generate / materialize (spec §6, §3.2 push strategy).
- * TODO(engine-replan): nightly replans call generatePlan from today; switch to replan(state, events)
- * once it lands so missed sessions, illness and pain feed the plan.
+ * Plan preview / generate / materialize (spec §6, §3.2 push strategy) and adaptive replanning (§8).
+ * Nightly and check-in replans run the engine's replan() on the stored plan, activities, check-ins
+ * and fitness: in-place changes revise the active plan row; a structural rebuild supersedes it.
  */
-import { generatePlan, HEAVY_CROSS_TRAINING_SHARE, weeklyLoad, type Plan, type PlannedWorkout } from "@paceo/engine";
+import {
+  addDays,
+  generatePlan,
+  HEAVY_CROSS_TRAINING_SHARE,
+  replan,
+  weeklyLoad,
+  type FitnessState,
+  type Plan,
+  type PlannedWorkout,
+  type PlanRequest,
+} from "@paceo/engine";
 import type { PlanResponse, PlanPreviewResponse, Profile, ScreeningOutcome } from "@paceo/contracts";
 import { Profile as ProfileSchema } from "@paceo/contracts";
-import { fitnessRepo, plansRepo, profileRepo, screeningRepo, workoutsRepo, type PlanRow, type PlannedWorkoutInsert } from "../repo/index.js";
+import {
+  activitiesRepo,
+  checkinsRepo,
+  fitnessRepo,
+  plansRepo,
+  profileRepo,
+  screeningRepo,
+  workoutsRepo,
+  type PlanRow,
+  type PlannedWorkoutInsert,
+} from "../repo/index.js";
+import { toEngineActivity, toEngineEvents, toFitnessState, type CheckinLike } from "../plan/replan-state.js";
 import { AppError } from "../http/errors.js";
 import { sha256Hex } from "../crypto/tokens.js";
 import { localDate } from "../lib/time.js";
@@ -196,20 +217,103 @@ export async function generateAndStore(
   return { row, changes };
 }
 
+/** History the replanner reads (§6.1 derived inputs use up to 16 weeks for CS; 120 days covers it). */
+export const REPLAN_HISTORY_DAYS = 120;
+export const REPLAN_CHECKIN_DAYS = 60;
+
+export interface ReplanOutcome {
+  status: "replanned" | "unchanged" | "skipped";
+  /** User-facing sentences for applied changes. */
+  changes: string[];
+  /** Proposals waiting for the user (e.g. a VDOT change); shown as advice. */
+  proposals: string[];
+  halted: boolean;
+}
+
+const SKIPPED: ReplanOutcome = { status: "skipped", changes: [], proposals: [], halted: false };
+
+function withFitness(input: PlanRequest, f: FitnessState): PlanRequest {
+  const out = { ...input, vdotStatus: f.status } as PlanRequest;
+  if (f.vdot !== undefined) out.vdot = f.vdot;
+  return out;
+}
+
 /**
- * Nightly replan stub (§12.1 replan:nightly): regenerate from today with the stored profile.
- * Skips users without a plan, without a valid screen, or whose race is in the past.
+ * Engine replan (§8) for one user. `extra` check-ins are included as if already stored (a check-in
+ * being recorded now). Deterministic given the stored rows and today's date.
+ */
+export async function runReplan(
+  svc: Services,
+  userId: string,
+  opts: { reason: "replan_nightly" | "replan_checkin"; extra?: CheckinLike[] },
+): Promise<ReplanOutcome> {
+  const current = await plansRepo.current(svc.db, userId);
+  if (!current) return SKIPPED;
+  const profile = await loadProfile(svc, userId);
+  if (!profile) return SKIPPED;
+  const plan = current.plan as Plan;
+  const input = current.input as PlanRequest;
+  const first = plan.weeks[0];
+  if (!first) return SKIPPED;
+  const today = localDate(svc.clock(), profile.timezone);
+  const end = plan.summary.endDate ?? plan.summary.raceDate;
+  if (end < today) return SKIPPED;
+
+  const activities = (await activitiesRepo.list(svc.db, userId, addDays(today, -REPLAN_HISTORY_DAYS), today)).map(toEngineActivity);
+  const checkins: CheckinLike[] = [...(await checkinsRepo.range(svc.db, userId, addDays(today, -REPLAN_CHECKIN_DAYS), today)), ...(opts.extra ?? [])];
+  const rows = await workoutsRepo.range(svc.db, userId, first.startDate, end);
+  const fitness = toFitnessState(await fitnessRepo.get(svc.db, userId), input.vdot !== undefined ? { vdot: input.vdot, vdotStatus: input.vdotStatus } : { vdotStatus: input.vdotStatus });
+  const runOn = (d: string) => activities.find((a) => a.date === d && a.sport === "run")?.id;
+  const events = toEngineEvents(checkins, rows, today, runOn);
+
+  const result = replan({ plan, input, fitness, activities, options: { units: profile.units } }, events, today);
+  const out: ReplanOutcome = {
+    status: "unchanged",
+    changes: result.changes.map((c) => c.message),
+    proposals: result.proposals.map((p) => p.message),
+    halted: result.halted !== undefined,
+  };
+  const workouts = result.plan.weeks.flatMap((w) => w.workouts);
+  const fitnessChanged = result.fitness.vdot !== fitness.vdot || result.fitness.status !== fitness.status;
+  if (!result.regenerated && !fitnessChanged && (await sameWorkouts(svc, userId, workouts, result.repush.from))) {
+    return { ...out, changes: [] };
+  }
+  const nextInput = result.derivedInput ?? input;
+  const paces = result.regenerated || fitnessChanged ? pacesFor(withFitness(nextInput, result.fitness)) : current.paces;
+  let planId = current.id;
+  if (result.regenerated) {
+    const row = await plansRepo.insertActive(svc.db, userId, { input: nextInput, plan: planJson(result.plan), paces, reason: opts.reason });
+    planId = row.id;
+  } else {
+    await plansRepo.updatePlan(svc.db, userId, current.id, { plan: planJson(result.plan), paces });
+  }
+  const changes = await materialize(svc, userId, planId, workouts, result.repush.from);
+  if (fitnessChanged) {
+    await fitnessRepo.upsert(svc.db, userId, {
+      vdot: result.fitness.vdot ?? null,
+      vdotSource: result.fitness.status,
+      vdotDate: result.fitness.history.at(-1)?.date ?? today,
+    });
+  }
+  if (changes.added > 0 || changes.removed > 0) {
+    await svc.jobs.enqueue(JOB.pushWorkouts, { userId }, { singletonKey: `push:${userId}`, singletonSeconds: 30 });
+  }
+  return { ...out, status: "replanned" };
+}
+
+/**
+ * Nightly replan (§12.1 replan:nightly): the engine's replan on what actually happened.
+ * Skips users without a plan or a valid screen, or whose plan has ended.
  */
 export async function replanUser(svc: Services, userId: string): Promise<"replanned" | "skipped"> {
   const current = await plansRepo.current(svc.db, userId);
   if (!current) return "skipped";
-  const profile = await loadProfile(svc, userId);
-  if (!profile) return "skipped";
-  const today = localDate(svc.clock(), profile.timezone);
-  if (profile.goal.type === "race" && profile.goal.raceDate < today) return "skipped";
+  const screening = await screeningOutcome(svc, userId);
+  if (!screening.canProceed) return "skipped";
   try {
-    await generateAndStore(svc, userId, "replan_nightly");
-    return "replanned";
+    const r = await runReplan(svc, userId, { reason: "replan_nightly" });
+    if (r.proposals.length > 0) svc.log.info({ userId, proposals: r.proposals.length }, "replan proposals pending");
+    return r.status === "replanned" ? "replanned" : "skipped";
   } catch (err) {
     if (err instanceof AppError) {
       svc.log.warn({ userId, code: err.code }, "nightly replan skipped");
