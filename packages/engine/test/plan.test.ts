@@ -14,10 +14,14 @@ import { hms, personaA, personaA2, personaB, personaC, raceIn } from "./personas
 import {
   allWorkouts,
   expectBasics,
+  expectCrossTrainingRules,
   expectDanielsCaps,
+  expectKeyBudget,
+  expectLockedEventsListed,
   expectLongRunIsLongest,
   expectNoDetraining,
   expectSchedule,
+  expectStrengthRules,
   expectTargetTracking,
   expectV1,
   expectWeeklyGrowth,
@@ -26,7 +30,7 @@ import {
 } from "./plan-checks.js";
 
 /** Every invariant that holds for every plan. */
-function expectAllInvariants(plan: Plan, input: PlanInput): void {
+export function expectAllInvariants(plan: Plan, input: PlanInput): void {
   expectV1(plan, input);
   expectSchedule(plan);
   expectWeeklyGrowth(plan);
@@ -35,9 +39,15 @@ function expectAllInvariants(plan: Plan, input: PlanInput): void {
   expectLongRunIsLongest(plan);
   expectTargetTracking(plan);
   expectNoDetraining(plan, input);
+  expectStrengthRules(plan);
+  expectCrossTrainingRules(plan);
+  expectKeyBudget(plan);
+  expectLockedEventsListed(plan, input);
 }
 
-const toDays = (p: Plan, weeks: number) => p.weeks.slice(0, weeks).flatMap((w) => w.workouts.map((x) => toDayNumber(x.date)));
+/** Run days only: strength shares days with runs. */
+const toDays = (p: Plan, weeks: number) =>
+  p.weeks.slice(0, weeks).flatMap((w) => w.workouts.filter((x) => x.sport === "run").map((x) => toDayNumber(x.date)));
 
 const isQualityLR = (p: Plan["weeks"][number]) => {
   const lr = p.workouts.find((x) => x.type === "L");
@@ -84,13 +94,22 @@ describe("persona B: intermediate marathon, 18 weeks (spec §4.3, §6)", () => {
     }
   });
 
-  it("I2: 1 quality + LR, a 2nd quality only in easy-LR weeks; none in FI", () => {
+  it("I2 + ½ key: the hard paddle leaves 1 quality + LR (2.5 of 3 key sessions); none in FI", () => {
     for (const wk of plan.weeks) {
+      const q = wk.workouts.filter(isQuality).length;
+      expect(q).toBeLessThanOrEqual(1);
+      if (wk.phase === "FI") expect(q).toBe(0);
+    }
+  });
+
+  it("I2 without the paddle: a 2nd quality only in easy-LR weeks", () => {
+    const dry = generatePlan({ ...personaB, lockedEvents: [] });
+    for (const wk of dry.weeks) {
       const q = wk.workouts.filter(isQuality).length;
       expect(q).toBeLessThanOrEqual(isQualityLR(wk) ? 1 : 2);
       if (wk.phase === "FI") expect(q).toBe(0);
     }
-    expect(plan.weeks.some((w) => w.workouts.filter(isQuality).length === 2)).toBe(true);
+    expect(dry.weeks.some((w) => w.workouts.filter(isQuality).length === 2)).toBe(true);
   });
 
   it("holds every invariant", () => {
@@ -166,7 +185,7 @@ describe("persona A: beginner who can run 20 min → no ladder, time-based runni
   });
 
   it("prescribes by time and RPE while VDOT is unknown", () => {
-    const runs = allWorkouts(plan).filter((w) => w.type !== "RACE");
+    const runs = allWorkouts(plan).filter((w) => w.sport === "run" && w.type !== "RACE");
     expect(runs.every((w) => w.prescription_mode === "time_rpe")).toBe(true);
   });
 
@@ -185,11 +204,14 @@ describe("persona A2: beginner who can't run 20 min → run/walk ladder first", 
     for (const wk of plan.weeks.slice(0, 3)) {
       expect(wk.isLadder).toBe(true);
       expect(wk.isCutback).toBe(false); // no cutbacks inside the ladder
-      expect(wk.workouts).toHaveLength(3);
-      expect(wk.workouts.every((w) => w.type === "RW" && w.prescription_mode === "run_walk")).toBe(true);
+      const runs = wk.workouts.filter((w) => w.sport === "run");
+      expect(runs).toHaveLength(3);
+      expect(runs.every((w) => w.type === "RW" && w.prescription_mode === "run_walk")).toBe(true);
     }
     expect(plan.weeks[0]!.workouts[0]!.name).toMatch(/stage 6/);
     expect(plan.weeks[2]!.workouts[0]!.name).toMatch(/stage 8/); // graduation: 20 min continuous
+    // Beginner runners get the bodyweight technique block alongside the ladder (§9.2).
+    expect(plan.weeks[0]!.workouts.some((w) => w.sport === "strength" && w.name.includes("technique"))).toBe(true);
     expect(plan.weeks[3]!.workouts.filter((w) => w.type === "TT")).toHaveLength(1);
   });
 
@@ -289,6 +311,44 @@ describe("properties across many generated plans", () => {
   variants.push({ ...personaB, raceDate: addDays(raceIn(18), -1) });
   variants.push({ ...personaC, goal: { distance: "10k", timeS: hms(0, 40, 30) }, raceDate: raceIn(10) });
   variants.push({ ...personaC, goal: { distance: "marathon" }, longRunMode: "pfitz", raceDate: raceIn(20), age: 45 });
+  // Strength and cross-training combinations (§9, §10).
+  variants.push({ ...personaB, longRunDay: "fri", raceDate: addDays(raceIn(18), -2) }); // hard paddle the day before the LR → reported
+  variants.push({
+    ...personaC,
+    lockedEvents: [{ weekday: "wed", activity: "soccer", minutes: 90, locked: false, name: "Pickup soccer" }],
+    strength: { mode: "running", equipment: "dumbbells", sessionsPerWeek: 3, liftingExperience: "novice" },
+  });
+  variants.push({
+    ...personaC,
+    runDays: 5,
+    strength: { mode: "full_body", equipment: "bodyweight", sessionsPerWeek: 2, liftingExperience: "none", upperBodyDays: "separate" },
+  });
+  variants.push({
+    ...personaB,
+    lockedEvents: [
+      { weekday: "mon", activity: "strength_lower", minutes: 60, name: "Own leg day" },
+      { weekday: "wed", activity: "WeightTraining", minutes: 50 },
+      { weekday: "thu", activity: "Ride", minutes: 60, srpe: 7 },
+    ],
+    strength: { mode: "external", equipment: "gym", sessionsPerWeek: 2, liftingExperience: "experienced", externalAddOn: true },
+  });
+  variants.push({ ...personaC, conservative: true });
+  variants.push({
+    ...personaC,
+    lockedEvents: [{ weekday: "wed", activity: "soccer", minutes: 90, hard: false, locked: false, name: "Pickup soccer (technique)" }],
+  });
+  variants.push({
+    ...personaC,
+    lockedEvents: [
+      { weekday: "tue", activity: "crossfit", minutes: 60 },
+      { weekday: "sat", activity: "swim", minutes: 45, srpe: 7 },
+    ],
+  });
+  for (const runDays of [3, 5, 6]) {
+    for (const longRunDay of ["sat", "wed"] as const) {
+      variants.push({ ...personaB, runDays, longRunDay, strength: { ...personaB.strength!, sessionsPerWeek: 3 } });
+    }
+  }
 
   const label = (v: PlanInput) => `${v.level} ${v.goal.distance} ${v.runDays}d LR ${v.longRunDay} race ${v.raceDate}`;
 

@@ -3,12 +3,30 @@
  * They re-derive the rules from the output alone, independent of the generator's internals.
  */
 import { expect } from "vitest";
-import { planPaces, prescriptionFor, toDayNumber, type Plan, type PlanInput, type PlannedWorkout, type Step } from "../src/index.js";
+import {
+  fromDayNumber,
+  isLowerStrength,
+  planPaces,
+  prescriptionFor,
+  strengthTaperDays,
+  toDayNumber,
+  weekdayOf,
+  weeklyLoad,
+  type CrossTrainingSession,
+  type Plan,
+  type PlanInput,
+  type PlannedWorkout,
+  type Step,
+} from "../src/index.js";
 
 const QUALITY = new Set(["T", "I", "R", "H", "M", "TT"]);
 export const isQuality = (w: PlannedWorkout): boolean => QUALITY.has(w.type);
 export const allWorkouts = (p: Plan): PlannedWorkout[] => p.weeks.flatMap((w) => w.workouts);
-const runs = (p: Plan) => allWorkouts(p).filter((w) => w.type !== "RACE");
+/** Run sessions only (strength shares days with runs). */
+export const runWorkouts = (p: Plan): PlannedWorkout[] => allWorkouts(p).filter((w) => w.sport === "run");
+export const strengthWorkouts = (p: Plan): PlannedWorkout[] => allWorkouts(p).filter((w) => w.sport === "strength");
+export const crossTraining = (p: Plan): CrossTrainingSession[] => p.weeks.flatMap((w) => w.crossTraining ?? []);
+const runs = (p: Plan) => runWorkouts(p).filter((w) => w.type !== "RACE");
 
 /**
  * V1 (§6.5): every run ≤ 1.10 × the longest non-race run in the prior 30 days, seeded with the
@@ -41,7 +59,7 @@ export function expectV1(p: Plan, input: PlanInput): void {
 /** §7.1 hard constraints, the 48 h rule, one run a day, and ≤ 3 key sessions a week (§6.4). */
 export function expectSchedule(p: Plan): void {
   const byDay = new Map<number, PlannedWorkout>();
-  for (const w of allWorkouts(p)) {
+  for (const w of runWorkouts(p)) {
     const day = toDayNumber(w.date);
     expect(byDay.has(day), `one session on ${w.date}`).toBe(false);
     byDay.set(day, w);
@@ -60,7 +78,8 @@ export function expectSchedule(p: Plan): void {
   }
 }
 
-const weekMinutes = (w: Plan["weeks"][number]) => w.workouts.reduce((a, x) => a + x.planned.minutes, 0);
+const weekMinutes = (w: Plan["weeks"][number]) =>
+  w.workouts.filter((x) => x.sport === "run").reduce((a, x) => a + x.planned.minutes, 0);
 
 /**
  * V2 "never above 30%" week to week. Weeks after a ladder week are compared by session time:
@@ -155,4 +174,109 @@ export function peakLongRunWeeksOut(p: Plan): number {
   const peak = Math.max(...lrs.map((w) => w.planned.run_m));
   const last = lrs.filter((w) => w.planned.run_m === peak).at(-1)!;
   return Math.floor((toDayNumber(p.summary.raceDate) - toDayNumber(last.date)) / 7);
+}
+
+const days = (ws: readonly { date: string }[]) => new Set(ws.map((w) => toDayNumber(w.date)));
+const lrDaysOf = (p: Plan) => days(runWorkouts(p).filter((w) => w.type === "L" || w.type === "RACE"));
+const qualityDaysOf = (p: Plan) => days(runWorkouts(p).filter((w) => w.flags.key_session && w.type !== "L" && w.type !== "RACE"));
+
+/**
+ * §9.5 ST rules on every app strength session with lower-body content, plus §9.4 race proximity,
+ * and the shape of every strength workout. External lower/full lifting counts for ST-5.
+ */
+export function expectStrengthRules(p: Plan): void {
+  const lr = lrDaysOf(p);
+  const quality = qualityDaysOf(p);
+  const xt = crossTraining(p);
+  const hardXt = days(xt.filter((x) => x.hard));
+  const teamDays = days(xt.filter((x) => x.cls === "team_sport" || x.cls === "hiit"));
+  const extLower = [...days(xt.filter((x) => x.lift !== undefined && x.lift !== "upper"))];
+  const raceDay = p.summary.mode === "general_fitness" ? undefined : toDayNumber(p.summary.raceDate);
+  const window = strengthTaperDays(p.summary.distance);
+
+  for (const w of strengthWorkouts(p)) {
+    expect(w.type, w.id).toBe("STRENGTH");
+    expect(w.planned.run_m, w.id).toBe(0);
+    expect(w.planned.minutes, w.id).toBeGreaterThan(0);
+    expect(w.planned.expected_srpe, w.id).toBeGreaterThan(0);
+    expect((w.exercises ?? []).length, w.id).toBeGreaterThan(0);
+    for (const e of w.exercises ?? []) expect(e.cues.length, `${w.id} ${e.id} cues`).toBeGreaterThan(0);
+    const d = toDayNumber(w.date);
+    if (raceDay !== undefined) {
+      expect(raceDay - d, `${w.date}: strength in race −3`).toBeGreaterThan(window.none);
+      const light = w.rule_trace.includes("§9.4:light");
+      if (!light) expect(raceDay - d, `${w.date}: heavy inside the last-heavy window`).toBeGreaterThanOrEqual(window.heavy);
+      if ((w.exercises ?? []).some((e) => e.slot === "PLYO")) expect(raceDay - d, `${w.date}: plyo too close`).toBeGreaterThanOrEqual(window.plyo);
+    }
+    if (!isLowerStrength(w)) {
+      expect(hardXt.has(d) && quality.has(d), `${w.date} ST-7 (upper)`).toBe(false);
+      continue;
+    }
+    expect(lr.has(d) || lr.has(d + 1) || lr.has(d + 2), `${w.date} ST-3`).toBe(false);
+    expect(quality.has(d + 1), `${w.date} ST-4`).toBe(false);
+    expect(hardXt.has(d) && quality.has(d), `${w.date} ST-7`).toBe(false);
+    expect(teamDays.has(d), `${w.date} team-sport day`).toBe(false);
+  }
+  // ST-5: ≥ 48 h between lower sessions; an add-on sits on its own external session's day.
+  const lower = [
+    ...strengthWorkouts(p).filter((w) => isLowerStrength(w) && !w.id.endsWith("-addon")).map((w) => toDayNumber(w.date)),
+    ...extLower,
+  ].sort((a, b) => a - b);
+  const extSet = new Set(extLower);
+  for (let i = 1; i < lower.length; i++) {
+    const a = lower[i - 1]!;
+    const b = lower[i]!;
+    if (extSet.has(a) && extSet.has(b)) continue; // two external sessions: reported as a conflict, not ours to move
+    expect(b - a, `ST-5 ${fromDayNumber(a)} → ${fromDayNumber(b)}`).toBeGreaterThanOrEqual(2);
+  }
+  // At most one app strength session a day.
+  const perDay = new Map<string, number>();
+  for (const w of strengthWorkouts(p)) perDay.set(w.date, (perDay.get(w.date) ?? 0) + 1);
+  for (const [date, n] of perDay) expect(n, `strength sessions on ${date}`).toBe(1);
+}
+
+/**
+ * §7.1 / §10.2 cross-training rules: no quality run on the day of or within 24 h after a hard,
+ * team-sport or HIIT session; no hard session the day before the LR unless the plan reports it
+ * (locked sessions aren't moved).
+ */
+export function expectCrossTrainingRules(p: Plan): void {
+  const lr = lrDaysOf(p);
+  const quality = qualityDaysOf(p);
+  const reported = new Set((p.summary.conflicts ?? []).filter((c) => c.code === "XT:hard_day_before_LR").map((c) => c.weekday));
+  for (const x of crossTraining(p)) {
+    const d = toDayNumber(x.date);
+    expect(x.load, `${x.date} ${x.name} load`).toBeCloseTo(x.expectedSrpe * x.minutes, 6);
+    if (x.blocksNextDayQuality) {
+      expect(quality.has(d), `${x.date}: quality on a ${x.name} day`).toBe(false);
+      expect(quality.has(d + 1), `${x.date}: quality within 24 h after ${x.name}`).toBe(false);
+    }
+    if (x.hard && lr.has(d + 1)) expect(reported.has(x.weekday), `${x.date}: hard ${x.name} before the LR, unreported`).toBe(true);
+  }
+}
+
+/** §6.4: key runs (race excluded) + ½ per hard cross-training day ≤ 3, unless the LR is the only key run. */
+export function expectKeyBudget(p: Plan): void {
+  for (const wk of p.weeks) {
+    const quality = wk.workouts.filter((w) => w.sport === "run" && w.flags.key_session && w.type !== "L" && w.type !== "RACE");
+    if (quality.length === 0) continue;
+    expect(weeklyLoad(wk).keySessions, `week ${wk.index} key sessions incl. ½ per hard cross-training`).toBeLessThanOrEqual(3);
+  }
+}
+
+/** Every locked event appears on every matching date of the plan (race day excepted), with 0 running km. */
+export function expectLockedEventsListed(p: Plan, input: Pick<PlanInput, "lockedEvents">): void {
+  const events = input.lockedEvents ?? [];
+  if (p.weeks.length === 0) return;
+  const xt = crossTraining(p);
+  const first = toDayNumber(p.weeks[0]!.startDate);
+  const last = toDayNumber(p.weeks.at(-1)!.startDate) + 6;
+  const raceDay = p.summary.mode === "general_fitness" ? undefined : toDayNumber(p.summary.raceDate);
+  for (let d = first; d <= last; d++) {
+    if (d === raceDay) continue;
+    const wd = weekdayOf(fromDayNumber(d));
+    const want = events.filter((e) => e.weekday === wd).length;
+    expect(xt.filter((x) => toDayNumber(x.date) === d).length, `locked events on ${fromDayNumber(d)}`).toBe(want);
+  }
+  for (const wk of p.weeks) expect(weeklyLoad(wk).runningKm).toBeGreaterThanOrEqual(0);
 }

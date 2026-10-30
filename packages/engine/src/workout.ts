@@ -67,6 +67,29 @@ export const WorkoutTypeSchema = z.enum([
 ]);
 export type WorkoutType = z.infer<typeof WorkoutTypeSchema>;
 
+/**
+ * One exercise inside a strength session (§9.3). Additive to the §3.8 DSL: runs never carry it and
+ * old workout JSON stays valid. `id` points into the exercise library (strength-library.ts), which
+ * holds the full card (description, faults, regression/progression).
+ */
+export const ExerciseSchema = z.object({
+  id: z.string(),
+  /** §9.3 slot: SQUAT, HINGE, SINGLE_LEG, CALF_STRAIGHT, CALF_BENT, HIP, CORE, UPPER_PUSH, UPPER_PULL, PLYO. */
+  slot: z.string(),
+  name: z.string(),
+  sets: z.number().int().min(1).max(10),
+  /** Per set, as text: "3–5", "8–12 / leg", "30–45 s / side", "10 contacts". */
+  reps: z.string(),
+  /** Load guidance: "RPE 8 (~85% 1RM)", "bodyweight, 3 s lowering", "≤ 40% 1RM, no failure". */
+  load: z.string(),
+  rest_s: z.number().nonnegative().optional(),
+  /** Plyometrics only: foot contacts for the whole exercise (§9.5). */
+  contacts: z.number().int().nonnegative().optional(),
+  cues: z.array(z.string()).default([]),
+  note: z.string().optional(),
+});
+export type Exercise = z.infer<typeof ExerciseSchema>;
+
 export const PlannedWorkoutSchema = z.object({
   id: z.string(),
   user_id: z.string(),
@@ -90,6 +113,8 @@ export const PlannedWorkoutSchema = z.object({
     })
     .default({}),
   rule_trace: z.array(z.string()).default([]),
+  /** Strength sessions only (sport "strength"): the exercises, in order (§9.3). */
+  exercises: z.array(ExerciseSchema).optional(),
 });
 export type PlannedWorkout = z.infer<typeof PlannedWorkoutSchema>;
 

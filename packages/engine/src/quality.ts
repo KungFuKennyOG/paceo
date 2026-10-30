@@ -4,10 +4,11 @@
  * Strides are not quality. Never more than 3 key sessions a week, counting the LR (C).
  */
 import type { GoalDistance, Level, LockedEvent, Phase, VdotStatus } from "./plan-types.js";
+import { classifyEvent, HARD_XT_KEY_COST } from "./cross-training.js";
 
 export const MAX_KEY_SESSIONS = 3;
 /** A hard cross-training session costs half a key session (§6.4, D). */
-export const HARD_CROSS_TRAINING_KEY_COST = 0.5;
+export const HARD_CROSS_TRAINING_KEY_COST = HARD_XT_KEY_COST;
 
 /** When the long run itself may carry M / fast-finish work (I2 + L3). */
 export type QualityLongRun = "never" | "alternate" | "alternate_from_TQ";
@@ -58,10 +59,17 @@ export function qualityAllowance(level: Level, runDays: number, monthsRunning: n
   }
 }
 
-/** Key sessions left for quality runs after the LR and hard cross-training (§6.4). */
+/**
+ * Key sessions left for quality runs after the LR and hard cross-training (§6.4): each hard
+ * cross-training day (§10.2) costs ½, so persona B's hard paddle leaves 1 quality run (Q + LR + ½ = 2.5).
+ */
 export function qualityBudget(lockedEvents: readonly LockedEvent[] = []): number {
-  const hard = lockedEvents.filter((e) => e.hard).length;
-  return Math.max(0, Math.floor(MAX_KEY_SESSIONS - 1 - HARD_CROSS_TRAINING_KEY_COST * hard));
+  return keyBudget(lockedEvents.reduce((a, e) => a + classifyEvent(e).keyCost, 0));
+}
+
+/** Quality runs that fit under the cap of 3 with the LR and `crossTrainingKeyCost` (sum of ½s). */
+export function keyBudget(crossTrainingKeyCost: number): number {
+  return Math.max(0, Math.floor(MAX_KEY_SESSIONS - 1 - crossTrainingKeyCost + 1e-9));
 }
 
 /** Whether this week's LR may carry quality content (before the alternation is applied). */
