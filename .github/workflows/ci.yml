@@ -36,3 +36,11 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm -r --if-present build
+
+  docker-smoke:
+    # Builds the production image and walks the main user flow against it (deploy/smoke-test.sh).
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash deploy/smoke-test.sh
