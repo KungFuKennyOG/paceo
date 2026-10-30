@@ -28,10 +28,16 @@ describe("TokenBucket", () => {
     // 10 more tokens at 5/s ≈ 2 s.
     expect(times[14]).toBeGreaterThanOrEqual(1990);
     expect(times[14]).toBeLessThanOrEqual(2100);
-    // Never more than 5 in any 1 s window after the burst.
-    for (let i = 5; i < times.length; i++) {
-      const inWindow = times.filter((x) => x > (times[i] as number) - 1000 && x <= (times[i] as number)).length;
-      expect(inWindow).toBeLessThanOrEqual(6);
+    // Burst + rate: never more than 10 in any 1 s window (intervals.icu allows 10 req/s per IP),
+    // and once the burst is spent, at most 5 per second.
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i] as number;
+      expect(times.filter((x) => x > t - 1000 && x <= t).length).toBeLessThanOrEqual(10);
+    }
+    const afterBurst = times.slice(5);
+    for (let i = 0; i < afterBurst.length; i++) {
+      const t = afterBurst[i] as number;
+      expect(afterBurst.filter((x) => x > t - 1000 && x <= t).length).toBeLessThanOrEqual(5);
     }
   });
 

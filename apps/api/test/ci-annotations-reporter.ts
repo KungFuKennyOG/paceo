@@ -53,7 +53,8 @@ export default class CiAnnotationsReporter implements Reporter {
     for (const e of errors as Array<{ message?: string; stack?: string }>) {
       failures.push(`apps/api/vitest(1,1): error TS9001: [unhandled] ${oneLine(e?.stack ?? e?.message ?? String(e))}`);
     }
-    for (const line of failures.slice(0, 10)) console.log(line);
-    console.log(`apps/api/vitest(1,1): info TS9000: vitest summary: ${passed} passed, ${failed} failed, ${skipped} skipped`);
+    // Distinct line numbers so GitHub does not fold annotations together.
+    failures.slice(0, 9).forEach((line, i) => console.log(line.replace(/\((\d+),1\): error/, `(${i + 2},1): error`)));
+    console.log(`apps/api/vitest-summary(900,1): warning TS9000: vitest summary: ${passed} passed, ${failed} failed, ${skipped} skipped`);
   }
 }
