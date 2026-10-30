@@ -1,0 +1,10 @@
+# Caddy alternative to the tunnel (VM with ports 80/443 open). HTTPS is automatic.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:3000
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+	}
+}

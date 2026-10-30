@@ -1,0 +1,111 @@
+# Paceo stack: api (Fastify + pg-boss + PWA) and Postgres 16.
+#   cd deploy && cp .env.example .env   (fill it in, chmod 600 .env)
+#   docker compose up -d --build                     # api + postgres, API on 127.0.0.1:3000
+#   docker compose --profile tunnel up -d            # + Cloudflare Tunnel (home box, no open ports)
+#   docker compose --profile caddy up -d             # + Caddy with Let's Encrypt (VM with ports 80/443)
+# Sized for a 1–2 GB machine: Postgres ~200–400 MB, API ~150–300 MB.
+
+name: paceo
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: paceo
+      POSTGRES_DB: paceo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=40
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paceo -d paceo"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: 512m
+    logging: *logging
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: paceo-api:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://paceo:${POSTGRES_PASSWORD}@postgres:5432/paceo
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Loopback only: the tunnel/Caddy reach it on the compose network; nothing is exposed publicly.
+    ports:
+      - "127.0.0.1:${API_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    mem_limit: 512m
+    logging: *logging
+
+  # Option 1 (home laptop): Cloudflare Tunnel. No inbound ports; HTTPS terminates at Cloudflare.
+  # In the Cloudflare dashboard, point the tunnel's public hostname at http://api:3000.
+  cloudflared:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in deploy/.env to use the tunnel profile}
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 128m
+    logging: *logging
+
+  # Option 2 (VM with a public IP): Caddy with automatic Let's Encrypt certificates.
+  caddy:
+    profiles: ["caddy"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in deploy/.env to use the caddy profile}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 128m
+    logging: *logging
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
