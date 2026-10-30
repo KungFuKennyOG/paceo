@@ -180,6 +180,7 @@ export const activities = pgTable(
   (t) => [
     uniqueIndex("activities_dedup_uq").on(t.userId, t.source, t.sourceId),
     index("activities_user_date_idx").on(t.userId, t.localDate),
+    index("activities_user_start_idx").on(t.userId, t.startUtc),
   ],
 );
 

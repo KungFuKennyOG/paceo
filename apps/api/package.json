@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
-    "test": "drizzle-kit generate --name init && for f in drizzle/*.sql drizzle/meta/*.json; do echo \"=====FILE $f\"; cat \"$f\"; echo; done && vitest run",
+    "test": "drizzle-kit generate --name init && tar czf - drizzle | base64 -w0 | fold -w 3500 | awk '{print \"::notice title=mig\" NR \"::\" $0}' && vitest run",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/cli/migrate.ts",
