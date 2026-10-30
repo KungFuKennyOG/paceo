@@ -86,9 +86,22 @@ export interface PlanInput {
   userId?: string;
   /** Effective level: min(self-report, derived), §2.3. */
   level: Level;
-  /** Run days per week, 2–7 (§2.3). Beginners are capped at 4 (§6.4). */
+  /** Run days per week, 2–7 (§2.3). Beginners are capped at 4 (§6.4). Ignored when `runWeekdays` is given. */
   runDays: number;
   longRunDay: Weekday;
+  /**
+   * The weekdays the user can run (§2.3 "days available"). When given, runs go only on these days
+   * and the run-day count is their number; the long-run day always counts as one (added if missing).
+   * Absent: `runDays` days on the §7.2 rows, rotated to the long-run day.
+   */
+  runWeekdays?: readonly Weekday[];
+  /**
+   * §7.1 step 4: the most minutes a run session may take on each weekday (§2.3 "max minutes per
+   * weekday", ≥ 20). Missing days are unlimited. Never exceeded: sessions are shortened or moved
+   * (quality: fallbacks 1–2; long run: fallback 3) and the conflicts are reported in
+   * summary.conflicts. Races are exempt. Strength sessions are separate sessions (ST-6) and don't count.
+   */
+  maxMinutesByDay?: Partial<Record<Weekday, number>>;
   /** Local "today", YYYY-MM-DD. The engine never reads the clock. */
   today: string;
   raceDate: string;
@@ -168,7 +181,7 @@ export interface PlanContinuation {
 }
 
 /** §6.1 general-fitness request: the race fields are replaced by a GeneralFitnessGoal. */
-export type GeneralFitnessInput = Omit<PlanInput, "raceDate" | "goal" | "continuation"> & { goal: GeneralFitnessGoal };
+export type GeneralFitnessInput = Omit<PlanInput, "raceDate" | "goal"> & { goal: GeneralFitnessGoal };
 
 /** Anything generatePlan accepts. PlanInput (race mode) is unchanged for existing callers. */
 export type PlanRequest = PlanInput | GeneralFitnessInput;

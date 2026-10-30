@@ -183,6 +183,7 @@ const TEMPLATES: Record<string, Tpl> = {
     if (s.startsWith("fallback1")) return "Moved to another day to keep 48 h between hard sessions.";
     if (s.startsWith("fallback2")) return "No day kept 48 h between hard sessions, so this is easy running with strides.";
     if (s === "no_LR_near_race") return "No long run this close to the race.";
+    if (s === "max_minutes") return "Sized to fit the time you have on this day.";
     return "Scheduling rule applied.";
   },
   S3: (r) => {

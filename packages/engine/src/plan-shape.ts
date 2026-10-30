@@ -22,9 +22,12 @@ import {
   EASY_MAX_MINUTES,
   EASY_MAX_MINUTES_BEGINNER,
   RECOVERY_MAX_MINUTES,
+  columnWeekday,
   weekTemplate,
+  type RunWeekdays,
   type TemplateSlot,
 } from "./scheduler.js";
+import type { Weekday } from "./dates.js";
 import { generalFitnessKinds, generalFitnessPhases, generalFitnessTargetKm } from "./general-fitness.js";
 
 export type WeekKind = "ladder" | "build" | "cutback" | "tt" | "taper";
@@ -66,6 +69,25 @@ export function effectiveRunDays(level: Level, runDays: number): number {
   return level === "beginner" ? Math.min(4, d) : d;
 }
 
+/** Run days the input asks for: the number of run weekdays (long-run day included) when given, else `runDays`. */
+export function requestedRunDays(input: Pick<PlanInput, "runDays" | "runWeekdays" | "longRunDay">): number {
+  return input.runWeekdays ? new Set([...input.runWeekdays, input.longRunDay]).size : input.runDays;
+}
+
+/** The weekday schedule options for weekTemplate, when the input names run weekdays. */
+export function runWeekdaysOf(input: Pick<PlanInput, "runWeekdays" | "longRunDay" | "maxMinutesByDay">): RunWeekdays | undefined {
+  if (!input.runWeekdays) return undefined;
+  const out: RunWeekdays = { days: input.runWeekdays, longRunDay: input.longRunDay };
+  if (input.maxMinutesByDay) out.maxMinutes = (wd) => maxMinutesOn(input, wd);
+  return out;
+}
+
+/** §7.1 step 4 limit (minutes) on a weekday; Infinity when none is set (non-positive values are ignored). */
+export function maxMinutesOn(input: Pick<PlanInput, "maxMinutesByDay">, weekday: Weekday): number {
+  const m = input.maxMinutesByDay?.[weekday];
+  return m !== undefined && Number.isFinite(m) && m > 0 ? m : Infinity;
+}
+
 /** VDOT is trusted for pace work only from a race or TT (§4.2). */
 export function needsTimeTrial(input: Pick<PlanInput, "vdotStatus">): boolean {
   return input.vdotStatus === "none" || input.vdotStatus === "estimated";
@@ -99,13 +121,44 @@ export function slotMaxKm(paces: PaceSet): (slot: TemplateSlot) => number {
  * the LR sits at its time/distance cap. V3 alone can set a peak that the run days can't carry
  * (e.g. persona B at 4 days); capping the peak here keeps targets placeable and taper multipliers honest.
  */
-export function templateCapacityKm(level: Level, runDays: number, paces: PaceSet, caps: LongRunCaps, generalFitness = false): number {
-  const lr = Math.min(caps.timeCapKm, caps.distanceCapKm);
+export function templateCapacityKm(
+  level: Level,
+  runDays: number,
+  paces: PaceSet,
+  caps: LongRunCaps,
+  generalFitness = false,
+  /** Run weekdays and §7.1 step 4 limits: what each day can hold (D). */
+  schedule?: CapacitySchedule,
+): number {
+  const weekdays = schedule?.weekdays;
+  const limit = (s: TemplateSlot, pace: number) => {
+    if (!schedule?.maxMinutes) return Infinity;
+    return (schedule.maxMinutes(columnWeekday(s.offset, schedule.longRunDay)) * 60) / pace;
+  };
+  const slots = weekTemplate(runDays, weekdays ? { generalFitness, weekdays } : { generalFitness });
+  const lrSlot = slots.find((s) => s.role === "L");
+  const lr = Math.min(caps.timeCapKm, caps.distanceCapKm, lrSlot ? limit(lrSlot, midPace(paces.LR)) : Infinity);
   const easy = easyMaxKm(level, runDays, paces, lr);
   const perSlot = slotMaxKm(paces);
-  return weekTemplate(runDays, { generalFitness })
+  return slots
     .filter((s) => s.role !== "L")
-    .reduce((acc, s) => acc + Math.min(easy, perSlot(s)), lr);
+    .reduce((acc, s) => acc + Math.min(easy, perSlot(s), limit(s, midPace(s.role === "REC" ? paces.REC : paces.E))), lrSlot ? lr : 0);
+}
+
+export interface CapacitySchedule {
+  longRunDay: Weekday;
+  weekdays?: RunWeekdays;
+  /** Minutes allowed on a weekday (Infinity = no limit). */
+  maxMinutes?: (weekday: Weekday) => number;
+}
+
+/** Capacity options for an input: its run weekdays and day limits. */
+function scheduleOf(input: PlanInput): CapacitySchedule {
+  const out: CapacitySchedule = { longRunDay: input.longRunDay };
+  const weekdays = runWeekdaysOf(input);
+  if (weekdays) out.weekdays = weekdays;
+  if (input.maxMinutesByDay) out.maxMinutes = (wd) => maxMinutesOn(input, wd);
+  return out;
 }
 
 export function ladderKm(stage: number, paces: PaceSet): number {
@@ -165,10 +218,10 @@ function shapeWithTaper(input: PlanInput, weeks: number, taperRequested: number,
   // V3 "week 1 starts at current volume". After a ladder the build resumes from the higher of the
   // entry volume and the last ladder week, never below what the runner already does (no detraining).
   // The only thing that lowers it is what the run days can hold under L1/S3 (D), which is flagged.
-  const runDays = effectiveRunDays(input.level, input.runDays);
+  const runDays = effectiveRunDays(input.level, requestedRunDays(input));
   const timeBased = prescriptionFor(input.level, input.vdotStatus, paces).longBy === "time";
   const lrCaps = longRunCaps(input.level, distance, input.longRunMode, paces.LR, { timeBased, runDays });
-  const capacityKm = templateCapacityKm(input.level, runDays, paces, lrCaps);
+  const capacityKm = templateCapacityKm(input.level, runDays, paces, lrCaps, false, scheduleOf(input));
   const lastStage = ladderStages[ladderStages.length - 1];
   const entryKm = Math.max(0, input.currentWeeklyKm, lastStage === undefined ? 0 : ladderKm(lastStage, paces));
   let startKm = entryKm;
@@ -240,10 +293,10 @@ export function generalFitnessShape(input: PlanInput, weeks: number, goal: Gener
   const buildKinds = generalFitnessKinds(buildCount, cutback.every, needsTimeTrial(input));
   const byWeek = generalFitnessPhases(ladderWeeks, buildCount, cutback.every);
 
-  const runDays = effectiveRunDays(input.level, input.runDays);
+  const runDays = effectiveRunDays(input.level, requestedRunDays(input));
   const timeBased = prescriptionFor(input.level, input.vdotStatus, paces).longBy === "time";
   const lrCaps = longRunCaps(input.level, distance, input.longRunMode, paces.LR, { timeBased, runDays });
-  const capacityKm = templateCapacityKm(input.level, runDays, paces, lrCaps, true);
+  const capacityKm = templateCapacityKm(input.level, runDays, paces, lrCaps, true, scheduleOf(input));
   const lastStage = ladderStages[ladderStages.length - 1];
   const entryKm = Math.max(0, input.currentWeeklyKm, lastStage === undefined ? 0 : ladderKm(lastStage, paces));
   const wantedKm = generalFitnessTargetKm(goal, midPace(paces.E));

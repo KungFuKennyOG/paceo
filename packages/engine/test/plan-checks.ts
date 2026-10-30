@@ -90,6 +90,7 @@ export function expectWeeklyGrowth(p: Plan): void {
     const prev = p.weeks[i - 1]!;
     const cur = p.weeks[i]!;
     if (prev.isLadder) {
+      if (weekMinutes(prev) <= 0) continue; // nothing fit that week (e.g. every ladder day over its time limit)
       expect(weekMinutes(cur), `ladder week ${cur.index}`).toBeLessThanOrEqual(weekMinutes(prev) * 1.3 + 0.5);
     } else if (prev.plannedKm > 0) {
       expect(cur.plannedKm, `week ${cur.index}`).toBeLessThanOrEqual(prev.plannedKm * 1.3 + 0.05);

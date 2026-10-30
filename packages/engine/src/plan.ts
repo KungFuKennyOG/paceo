@@ -37,7 +37,10 @@ import {
   easyMaxKm,
   effectiveRunDays,
   generalFitnessShape,
+  maxMinutesOn,
   planShape,
+  requestedRunDays,
+  runWeekdaysOf,
   slotMaxKm,
   type PlanShape,
   type WeekKind,
@@ -59,6 +62,7 @@ import {
   CUTBACK_QUALITY_FACTOR,
   CUTBACK_VOLUME_FACTOR,
   MAX_WEEK_OVER_WEEK,
+  WEEKLY_GROWTH_NEVER,
 } from "./volume.js";
 import { lastHardSessionDays, TAPER_QUALITY_WORK_FRACTION, taperLongRunFraction } from "./taper.js";
 import {
@@ -68,6 +72,8 @@ import {
   spreadEasy,
   weekTemplate,
   type EasySlot,
+  type RunWeekdays,
+  type TemplateOptions,
 } from "./scheduler.js";
 import * as W from "./workouts.js";
 import { LADDER_WALK_WARMUP_S, ladderSessionSecondsWith } from "./ladder.js";
@@ -125,6 +131,10 @@ interface Env {
   qualityBlocked: Set<number>;
   /** Subset of qualityBlocked caused only by flexible sessions (fallback 5). */
   flexibleBlocked: Set<number>;
+  /** The user's run weekdays (§2.3), when given. */
+  weekdays?: RunWeekdays;
+  /** §7.1 step 4: minutes a run may take on an absolute day (Infinity = no limit). */
+  dayCap: (day: number) => number;
 }
 
 interface State {
@@ -137,6 +147,8 @@ interface State {
   peakLrKm: number;
   /** Last week's planned running km (V2 is checked against what was planned, not the target). */
   prevPlannedKm: number;
+  /** Last week's planned running minutes (V2 after a run/walk week is judged by time, §6.5). */
+  prevPlannedMinutes: number;
 }
 
 interface WeekInfo {
@@ -154,6 +166,10 @@ interface WeekInfo {
   budget: number;
   /** Caps that pushed planned km away from the target this week (rule IDs, for VolumeFlag). */
   caps: Set<string>;
+  /** V2 "never above 30%" over last week's planned km (Infinity when exempt). */
+  v2HardKm: number;
+  /** The same, by session time, for the first week after a run/walk week (Infinity otherwise). */
+  v2HardMinutes: number;
 }
 
 interface Placed {
@@ -215,12 +231,14 @@ function runPlan(env: Env, feasibility: Feasibility, input: PlanInput): Plan {
     lrLevelKm: input.longestRun30d.km,
     peakLrKm: cont ? input.longestRun30d.km : 0,
     prevPlannedKm: 0,
+    prevPlannedMinutes: 0,
   };
   const runWeeks: PlanWeek[] = [];
   for (let w = 1; w <= env.cal.weeks; w++) runWeeks.push(planWeek(env, st, w));
 
   const conflicts: ScheduleConflict[] = [];
   crossTrainingConflicts(env, runWeeks, conflicts);
+  dayLimitConflicts(env, runWeeks, conflicts);
   const strength = scheduleStrength(
     {
       userId: env.userId,
@@ -257,7 +275,8 @@ function effectiveInput(input: PlanInput, feasibility: Plan["feasibility"]): Pla
 }
 
 function makeEnv(input: PlanInput, cal: PlanCalendar, shape: PlanShape, mode: PlanMode): Env {
-  const runDays = effectiveRunDays(input.level, input.runDays);
+  const runDays = effectiveRunDays(input.level, requestedRunDays(input));
+  const weekdays = runWeekdaysOf(input);
   const rx = prescriptionFor(input.level, input.vdotStatus, shape.paces);
   const lastDay = cal.startDay + 7 * cal.weeks - 1;
   const xt = expandLockedEvents(input.lockedEvents ?? [], cal.startDay, lastDay, mode === "race" ? cal.raceDay : undefined);
@@ -278,7 +297,19 @@ function makeEnv(input: PlanInput, cal: PlanCalendar, shape: PlanShape, mode: Pl
     xt,
     qualityBlocked: blocked,
     flexibleBlocked: flexible,
+    ...(weekdays ? { weekdays } : {}),
+    dayCap: (day) => maxMinutesOn(input, weekdayOf(fromDayNumber(day))),
   };
+}
+
+/** Template options shared by every week: the long-run offset and the user's run weekdays. */
+function templateOptions(env: Env, extra: TemplateOptions = {}): TemplateOptions {
+  return { ...extra, lrOffset: env.cal.lrOffset, ...(env.weekdays ? { weekdays: env.weekdays } : {}) };
+}
+
+/** §7.1 step 4: the day's time limit on top of a run's V1 / long-run limit. */
+function withDayCap(limit: V1Limit, capMin: number): V1Limit {
+  return capMin < limit.minutes ? { ...limit, minutes: capMin } : limit;
 }
 
 /**
@@ -342,6 +373,8 @@ function weekInfo(env: Env, w: number): WeekInfo {
     phaseLen: last - first + 1,
     budget: keyBudget(crossTrainingKeyCost(env, startDay)),
     caps: new Set(),
+    v2HardKm: Infinity,
+    v2HardMinutes: Infinity,
   };
 }
 
@@ -368,6 +401,7 @@ function planWeek(env: Env, st: State, w: number): PlanWeek {
   const lr = workouts.find((x) => x.type === "L");
   const plannedKm = sumKm(workouts);
   st.prevPlannedKm = plannedKm;
+  st.prevPlannedMinutes = workouts.filter((x) => x.type !== "RACE").reduce((a, x) => a + x.planned.minutes, 0);
   const week: PlanWeek = {
     index: w,
     startDate: fromDayNumber(info.startDay),
@@ -425,7 +459,11 @@ function capWeeklyKm(env: Env, info: WeekInfo): number {
  * (V3: the runner already does that much) and V2 is judged by session time there instead (D).
  */
 function capToPreviousWeek(info: WeekInfo, st: State, prevWasLadder: boolean): WeekInfo {
+  if (info.kind !== "ladder" && prevWasLadder && st.prevPlannedMinutes > 0) {
+    info.v2HardMinutes = st.prevPlannedMinutes * (1 + WEEKLY_GROWTH_NEVER);
+  }
   if (info.kind === "ladder" || prevWasLadder || st.prevPlannedKm <= 0) return info;
+  info.v2HardKm = st.prevPlannedKm * (1 + WEEKLY_GROWTH_NEVER);
   const cap = st.prevPlannedKm * MAX_WEEK_OVER_WEEK;
   if (info.targetKm <= cap) return info;
   info.caps.add("V2:30%_over_last_week");
@@ -457,17 +495,24 @@ function ladderWeek(env: Env, st: State, info: WeekInfo, notes: string[]): Place
   const planned = env.shape.ladderStages[info.w - 1] as number;
   const ctx = buildContext(env, info);
   const sameWeek: RunRecord[] = [];
-  return weekTemplate(env.runDays, { ladder: true, lrOffset: env.cal.lrOffset }).map((slot) => {
+  return weekTemplate(env.runDays, templateOptions(env, { ladder: true })).flatMap((slot): Placed[] => {
     const day = info.startDay + slot.offset;
     // Run/walk V1 is by total duration only (§6.5), so the time limit applies even in pace mode.
     const { ref } = v1At(env, st, day, sameWeek);
-    const maxMin = V1_FACTOR * ref.minutes;
+    const v1Min = V1_FACTOR * ref.minutes;
+    const maxMin = Math.min(v1Min, env.dayCap(day));
     const fit = fitLadderStage(planned, maxMin);
-    if (fit.stage !== planned) notes.push(`V1: stage ${planned} is too long yet; repeating stage ${fit.stage}.`);
+    if (fit.stage !== planned) {
+      notes.push(maxMin < v1Min ? `S:max_minutes_ladder_d${slot.offset}` : `V1: stage ${planned} is too long yet; repeating stage ${fit.stage}.`);
+    }
+    if (fit.minutes > env.dayCap(day) + 1e-9) {
+      notes.push(`S:max_minutes_ladder_d${slot.offset}`); // not even stage 1 fits the day (§7.1 step 4)
+      return [];
+    }
     const trace = ["C1:ladder_no_cutback", `V1:ok(${fit.minutes.toFixed(0)}min<=${maxMin.toFixed(0)}min)`];
     if (fit.walkS < LADDER_WALK_WARMUP_S) trace.push("V1:short_walk_warmup");
     sameWeek.push({ day, minutes: fit.minutes });
-    return { offset: slot.offset, draft: W.ladderSession(ctx, fit.stage, trace, fit.walkS) };
+    return [{ offset: slot.offset, draft: W.ladderSession(ctx, fit.stage, trace, fit.walkS) }];
   });
 }
 
@@ -490,11 +535,19 @@ function runWeek(env: Env, st: State, info: WeekInfo, notes: string[]): Placed[]
   const ctx = buildContext(env, info);
   const lrQuality = decideQualityLongRun(env, st, info);
   const picks = chooseQuality(env, info, lrQuality);
-  const slots = weekTemplate(env.runDays, {
-    noConsecutiveDays: input.level === "beginner" && info.w <= 4,
-    lrOffset: env.cal.lrOffset,
-    generalFitness: env.mode === "general_fitness",
-  });
+  const slots = weekTemplate(
+    env.runDays,
+    templateOptions(env, { noConsecutiveDays: input.level === "beginner" && info.w <= 4, generalFitness: env.mode === "general_fitness" }),
+  );
+  // §7.1 step 4: a quality session may only go on a day whose time limit it fits (warm-up and
+  // cool-down trimmed if needed); otherwise fallback 1 moves it, fallback 2 makes it easy.
+  const qualityFits = (i: number, offset: number): boolean => {
+    const cap = env.dayCap(info.startDay + offset);
+    const pick = picks[i];
+    if (!Number.isFinite(cap) || !pick) return true;
+    const draft = qualityDraft(ctx, pick, { exposures: peekExposure(env, st, info, pick.kind), workFactor: workFactor(info.kind), trace: pick.trace });
+    return draft.planned.minutes <= cap + 1e-9 || W.fitWarmCool(ctx, draft, Infinity, cap) !== undefined;
+  };
   // T3: no long run inside the last-hard-session window (e.g. a Saturday LR before a Sunday race).
   const lrDaysToRace = env.cal.raceDay - (info.startDay + env.cal.lrOffset);
   const placement = placeWeek({
@@ -508,6 +561,7 @@ function runWeek(env: Env, st: State, info: WeekInfo, notes: string[]): Placed[]
     minDaysBeforeRace: lastHardSessionDays(input.goal.distance).min,
     qualityBlockedDays: env.qualityBlocked,
     flexibleBlockedDays: env.flexibleBlocked,
+    qualityFits,
   });
   notes.push(...placement.trace);
 
@@ -519,8 +573,10 @@ function runWeek(env: Env, st: State, info: WeekInfo, notes: string[]): Placed[]
     lrKm = lrDraft.planned.run_m / 1000;
   }
 
-  // No other run outranks the week's long run, except in taper and TT weeks (D).
-  const lrRules = lrKm > 0 && info.kind !== "taper" && info.kind !== "tt";
+  // No other run outranks the week's long run, except in taper and TT weeks (D) – unless the TT
+  // couldn't be placed (e.g. no day had the time for it, §7.1 step 4).
+  const ttPlaced = picks.some((p, i) => p.kind === "TT" && placement.qualityOffsets[i] !== undefined);
+  const lrRules = lrKm > 0 && info.kind !== "taper" && !(info.kind === "tt" && ttPlaced);
   let lrCapKm = lrRules ? lrKm : Infinity;
 
   picks.forEach((pick, i) => {
@@ -558,7 +614,55 @@ function runWeek(env: Env, st: State, info: WeekInfo, notes: string[]): Placed[]
     const predicted = predictedGoalTimeS(input, shape.paces.vdot);
     placed.push({ offset: env.cal.raceOffset, draft: W.raceDay(ctx, input.goal.timeS, predicted) });
   }
-  return enforceV1InDateOrder(env, st, info, ctx, placed);
+  return enforceV1InDateOrder(env, st, info, ctx, enforceWeeklyGrowthNever(env, info, ctx, placed));
+}
+
+/**
+ * V2 "never above 30%" as a hard guard (§6.5). Targets are already capped against last week, but
+ * S3's minimum run length (and the entered longest run as the LR floor) can push a sparse week over
+ * when the week before was far under target, e.g. a single-run beginner week on adjacent weekdays.
+ * What gives way, in order (D): easy runs (the longest shortened if it stays ≥ the S3 minimum,
+ * else the shortest dropped), then quality warm-ups / cool-downs, then quality sessions, then the LR.
+ */
+function enforceWeeklyGrowthNever(env: Env, info: WeekInfo, ctx: W.BuildContext, placed: Placed[]): Placed[] {
+  // After a run/walk week V2 is judged by session time (§6.5), otherwise by km.
+  const byTime = Number.isFinite(info.v2HardMinutes);
+  const hard = byTime ? info.v2HardMinutes : info.v2HardKm;
+  const kmOf = (p: Placed) => (byTime ? p.draft.planned.minutes : p.draft.planned.run_m / 1000);
+  const total = (ps: readonly Placed[]) => ps.filter((p) => p.draft.type !== "RACE").reduce((a, p) => a + kmOf(p), 0);
+  if (!(total(placed) - hard > 1e-9)) return placed;
+  info.caps.add("V2:30%_over_last_week");
+  const minMin = env.input.level === "beginner" ? EASY_MIN_MINUTES_BEGINNER : EASY_MIN_MINUTES;
+  const minKm = byTime ? minMin : W.easyKmForMinutes(ctx.paces, minMin);
+  const limitOf = (p: Placed, size: number): V1Limit =>
+    byTime ? { km: p.draft.planned.run_m / 1000, minutes: Math.floor(size) } : { km: floorKm(size - 0.05), minutes: Infinity };
+  const excess = (ps: readonly Placed[]) => total(ps) - hard;
+  const swap = (ps: Placed[], p: Placed, draft: W.WorkoutDraft) => ps.map((x) => (x === p ? { offset: x.offset, draft: withTrace(draft, "V2:30%_over_last_week") } : x));
+  let out = [...placed];
+
+  const easy = out.filter((p) => p.draft.type === "E" || p.draft.type === "S");
+  const longest = [...easy].sort((a, b) => kmOf(b) - kmOf(a) || a.offset - b.offset)[0];
+  if (longest && kmOf(longest) - excess(out) >= minKm) {
+    return swap(out, longest, shrinkToLimit(ctx, longest.draft, limitOf(longest, kmOf(longest) - excess(out))));
+  }
+  for (const p of [...easy].sort((a, b) => kmOf(a) - kmOf(b) || b.offset - a.offset)) {
+    if (excess(out) <= 1e-9) return out;
+    out = out.filter((x) => x !== p);
+  }
+  const quality = out.filter((p) => p.draft.flags.key_session && p.draft.type !== "L" && p.draft.type !== "RACE");
+  for (const p of quality) {
+    if (excess(out) <= 1e-9) return out;
+    const lim = limitOf(p, kmOf(p) - excess(out));
+    const trimmed = W.fitWarmCool(ctx, p.draft, lim.km, lim.minutes);
+    if (trimmed) return swap(out, p, trimmed);
+  }
+  for (const p of [...quality].sort((a, b) => kmOf(a) - kmOf(b) || b.offset - a.offset)) {
+    if (excess(out) <= 1e-9) return out;
+    out = out.filter((x) => x !== p);
+  }
+  const lr = out.find((p) => p.draft.type === "L");
+  if (lr && excess(out) > 1e-9) out = swap(out, lr, shrinkToLimit(ctx, lr.draft, limitOf(lr, Math.max(byTime ? 1 : 0.15, kmOf(lr) - excess(out)))));
+  return out;
 }
 
 /**
@@ -576,11 +680,14 @@ function enforceV1InDateOrder(env: Env, st: State, info: WeekInfo, ctx: W.BuildC
     const day = info.startDay + p.offset;
     let draft = p.draft;
     if (draft.type !== "RACE") {
-      const { limit } = v1At(env, st, day, sameWeek);
+      const { limit: v1 } = v1At(env, st, day, sameWeek);
+      const limit = withDayCap(v1, env.dayCap(day));
       const km = draft.planned.run_m / 1000;
       if (!v1Ok(km, draft.planned.minutes, limit, draft.type === "RW")) {
+        const byDay = v1Ok(km, draft.planned.minutes, v1, draft.type === "RW");
         draft = shrinkToLimit(ctx, draft, limit);
-        info.caps.add("V1:cap");
+        if (byDay) draft = withTrace(draft, "S:max_minutes");
+        info.caps.add(byDay ? "S:max_minutes" : "V1:cap");
       }
       const minutes: number = draft.planned.minutes;
       const runM: number = draft.planned.run_m;
@@ -681,6 +788,12 @@ export function exposureFamilyOf(w: Pick<PlannedWorkout, "type" | "rule_trace">)
   }
 }
 
+/** The exposure count the next session of this kind would get, without counting it. */
+function peekExposure(env: Env, st: State, info: WeekInfo, kind: QualityKind | "TT"): number {
+  const n = st.exposures.get(exposureKey(env, kind)) ?? 0;
+  return info.kind === "taper" ? Math.max(0, (n || 1) - 1) : n;
+}
+
 function nextExposure(env: Env, st: State, kind: QualityKind | "TT" | "LR_M"): number {
   const key = exposureKey(env, kind);
   const n = st.exposures.get(key) ?? 0;
@@ -707,10 +820,13 @@ function buildQuality(
   if (pick.kind === "TT") info.caps.add("TT:fixed_session");
 
   const { limit } = v1At(env, st, info.startDay + offset);
-  const capped = withLrCap(limit, lrCapKm);
+  const lrCapped = withLrCap(limit, lrCapKm);
+  const capped = withDayCap(lrCapped, env.dayCap(info.startDay + offset));
   const fitted = W.fitWarmCool(ctx, draft, capped.km, capped.minutes);
-  if (fitted !== draft) info.caps.add(capped === limit ? "V1:cap" : "LR:longest_run_of_week");
-  if (fitted) return withTrace(fitted, v1Trace(fitted.planned.run_m / 1000, limit));
+  // Which limit trimmed it: the day's time (§7.1 step 4), V1, or the week's long run.
+  const byDay = fitted !== draft && capped !== lrCapped && W.fitWarmCool(ctx, draft, lrCapped.km, lrCapped.minutes) === draft;
+  if (fitted !== draft) info.caps.add(byDay ? "S:max_minutes" : lrCapped === limit ? "V1:cap" : "LR:longest_run_of_week");
+  if (fitted) return withTrace(byDay ? withTrace(fitted, "S:max_minutes") : fitted, v1Trace(fitted.planned.run_m / 1000, limit));
   // Still over V1 (or the LR) after trimming: convert to easy + strides (never exceed V1, §6.5).
   const km = Math.min(capped.km, (capped.minutes * 60) / midPace(ctx.paces.E));
   return fitEasy(ctx, km, { strides: W.strideCount(info.w), trace: [...pick.trace, "V1:Q->E+S"] }, capped);
@@ -779,6 +895,9 @@ function longRunKm(
     [limit.km, "V1:cap"],
     [(limit.minutes * 60) / midPace(env.shape.paces.LR), "V1:time_cap"],
   ];
+  // §7.1 step 4 / fallback 3: the long run shortened to what the day's time limit allows.
+  const cap = env.dayCap(env.cal.raceDay - daysToRace);
+  if (Number.isFinite(cap)) options.push([(cap * 60) / midPace(env.shape.paces.LR), "S:max_minutes"]);
   if (info.kind === "taper") {
     const f = taperLongRunFraction(info.weeksOut);
     options.push([f * st.peakLrKm, `T3:LR×${f}`]);
@@ -792,12 +911,15 @@ function longRunKm(
   } else {
     const l2 = lrStepLimitKm(ref.km);
     options.push([l2.km, l2.rule]);
+    // A week held back by V2 never gets a long run bigger than the whole week (sparse schedules).
+    if (info.caps.has("V2:30%_over_last_week")) options.push([info.targetKm, "V2:30%_over_last_week"]);
     if (daysToRace < PEAK_LR_MIN_DAYS_OUT && st.peakLrKm > 0) {
       options.push([PRE_TAPER_LR_FRACTION * st.peakLrKm, "L2:peak_3-5wk_out"]);
     }
   }
   const [raw, rule] = options.reduce((a, b) => (b[0] < a[0] ? b : a));
   const km = floorKm(Math.max(0, raw));
+  if (rule === "S:max_minutes") info.caps.add(rule);
   if (info.kind === "build" && rule !== "L2:peak_3-5wk_out") {
     st.lrLevelKm = km;
     st.peakLrKm = Math.max(st.peakLrKm, km);
@@ -812,14 +934,24 @@ function buildEasyRuns(
   st: State,
   info: WeekInfo,
   ctx: W.BuildContext,
-  slots: readonly EasySlot[],
+  allSlots: readonly EasySlot[],
   budgetKm: number,
   lrKm: number,
   lrCapKm: number,
   notes: string[],
 ): Placed[] {
+  let slots = allSlots;
   const minMin = env.input.level === "beginner" ? EASY_MIN_MINUTES_BEGINNER : EASY_MIN_MINUTES;
   const minKm = W.easyKmForMinutes(ctx.paces, minMin);
+  // §7.1 step 4: each easy run fits its day's time limit; a day that can't hold the S3 minimum is
+  // left free (D) and the volume it can't take is reported.
+  const dayKm = (slot: EasySlot) => {
+    const cap = env.dayCap(info.startDay + slot.offset);
+    return Number.isFinite(cap) ? (cap * 60) / midPace(slot.role === "REC" ? ctx.paces.REC : ctx.paces.E) : Infinity;
+  };
+  const tooShort = slots.filter((s) => dayKm(s) < minKm - 1e-9);
+  for (const s of tooShort) notes.push(`S:max_minutes_easy_d${s.offset}`);
+  if (tooShort.length > 0) slots = slots.filter((s) => !tooShort.includes(s));
   // S3 caps easy runs at 70% of the LR. In cutback/TT/taper weeks the LR is cut on purpose (−30%),
   // more than the week (−5 to −25%), so S3 uses the normal LR level there; otherwise the run days
   // can't carry the week. The "LR is the longest run" rule (lrCapKm) still applies on top (D).
@@ -841,18 +973,22 @@ function buildEasyRuns(
       .slice(0, strideSessions)
       .map((s) => s.offset),
   );
+  const perSlot = slotMaxKm(ctx.paces);
   const spread = spreadEasy(
     budgetKm - strideSessions * perStrideKm,
     slots,
     minKm,
     Math.min(maxKm, lrCapKm),
-    slotMaxKm(ctx.paces),
+    (s) => Math.min(perSlot(s), dayKm(s as EasySlot)),
   );
+  const atDayCap = slots.filter((s, i) => Number.isFinite(dayKm(s)) && (spread.km[i] ?? 0) >= Math.min(maxKm, lrCapKm, perSlot(s), dayKm(s)) - 0.05 && dayKm(s) < Math.min(maxKm, lrCapKm, perSlot(s)));
+  if (spread.unplacedKm > 0.05) info.caps.add("S3:easy_capacity");
   if (spread.unplacedKm > 0.5) {
     notes.push(`S3: ${spread.unplacedKm.toFixed(1)} km of easy volume doesn't fit; more run days would help.`);
-    info.caps.add("S3:easy_capacity");
+    for (const s of atDayCap) notes.push(`S:max_minutes_easy_d${s.offset}`);
+    if (atDayCap.length > 0 || tooShort.length > 0) info.caps.add("S:max_minutes");
   }
-  if (spread.trace.includes("S3:raised_to_min")) info.caps.add("S3:easy_min_length");
+  if (spread.trace.includes("S3:raised_to_min") || spread.trace.includes("S3:no_easy_volume")) info.caps.add("S3:easy_min_length");
   if (budgetKm < 0) info.caps.add("S3:no_easy_budget");
 
   const out: Placed[] = [];
@@ -865,9 +1001,10 @@ function buildEasyRuns(
       strides: strideSlots.has(slot.offset) ? strideN : 0,
       trace: spread.trace,
     };
-    const draft = fitEasy(ctx, km, opts, withLrCap(limit, lrCapKm));
+    const cap = env.dayCap(info.startDay + slot.offset);
+    const draft = fitEasy(ctx, km, opts, withDayCap(withLrCap(limit, lrCapKm), cap));
     const wanted = km + W.stridesKm(ctx, opts.strides ?? 0);
-    if (draft.planned.run_m / 1000 < wanted - 0.3) info.caps.add(km > limit.km ? "V1:cap" : "LR:longest_run_of_week");
+    if (draft.planned.run_m / 1000 < wanted - 0.3) info.caps.add(km > limit.km ? "V1:cap" : draft.planned.minutes >= cap - 1 ? "S:max_minutes" : "LR:longest_run_of_week");
     out.push({ offset: slot.offset, draft });
   });
   return out;
@@ -878,7 +1015,7 @@ function shakeout(env: Env, st: State, info: WeekInfo, ctx: W.BuildContext, offs
   const minutes = env.input.level === "beginner" ? EASY_MIN_MINUTES_BEGINNER : EASY_MIN_MINUTES;
   const km = W.easyKmForMinutes(ctx.paces, minutes);
   const { limit } = v1At(env, st, info.startDay + offset);
-  return fitEasy(ctx, km, { shakeout: true, strides: 4, trace: ["T3:shakeout"] }, limit);
+  return fitEasy(ctx, km, { shakeout: true, strides: 4, trace: ["T3:shakeout"] }, withDayCap(limit, env.dayCap(info.startDay + offset)));
 }
 
 /**
@@ -1059,6 +1196,36 @@ function crossTrainingConflicts(env: Env, weeks: readonly PlanWeek[], out: Sched
           ...(alt !== undefined ? { suggestion: `§7.1 fallback 5: move it to ${WD(alt)}.` } : {}),
         });
       }
+    }
+  }
+}
+
+/**
+ * §7.1 step 4 ("respect max_session_minutes_by_day") with fallbacks 1–3 and 6: every run already
+ * fits its day; what the limits cost is reported here (D), once per code and weekday with its weeks.
+ */
+function dayLimitConflicts(env: Env, weeks: readonly PlanWeek[], out: ScheduleConflict[]): void {
+  const limit = (day: number) => `${Math.round(env.dayCap(day))}-min limit on ${WD(day)}`;
+  const add = (code: string, day: number, week: number, message: string, suggestion: string) =>
+    recordConflict(out, { code, weekday: weekdayOf(fromDayNumber(day)), week, message, suggestion });
+  for (const wk of weeks) {
+    const start = toDayNumber(wk.startDate);
+    for (const n of new Set(wk.notes)) {
+      const m = /^S:max_minutes_(blocks|easy|ladder)_d(\d)$/.exec(n);
+      if (!m) continue;
+      const day = start + Number(m[2]);
+      if (m[1] === "blocks") {
+        add("S:max_minutes_quality", day, wk.index, `A quality session doesn't fit your ${limit(day)}, so it moved to another day or became easy running with strides (§7.1 fallbacks 1–2).`, `Allow more time on ${WD(day)} to keep it there.`);
+      } else if (m[1] === "easy") {
+        add("S:max_minutes_easy_volume", day, wk.index, `Your ${limit(day)} leaves part of the week's easy volume unplanned (§7.1 step 6: "needs more days").`, `Allow more time on ${WD(day)}, or add a run day.`);
+      } else {
+        add("S:max_minutes_run_walk", day, wk.index, `Your ${limit(day)} holds the run/walk session to an earlier stage.`, `Allow more time on ${WD(day)}.`);
+      }
+    }
+    for (const w of wk.workouts) {
+      if (w.sport !== "run" || w.type !== "L" || !w.rule_trace.includes("S:max_minutes")) continue;
+      const day = toDayNumber(w.date);
+      add("S:max_minutes_long_run", day, wk.index, `The long run is held to your ${limit(day)} (§7.1 fallback 3: the longest run that fits).`, `Allow more time on ${WD(day)}, or pick a long-run day with more time.`);
     }
   }
 }

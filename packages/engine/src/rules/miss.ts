@@ -90,6 +90,7 @@ function keySlot(ctx: RuleContext, moved: PlannedWorkout, from: string, to: stri
       if (keys + 1 > MAX_KEYS_PER_WEEK) continue;
     }
     if (extra && !extra(date)) continue;
+    if (moved.planned.minutes > ctx.maxMinutesOn(date) + 1e-9) continue; // §7.1 step 4
     const future = ctx.workouts.filter((w) => w.date >= ctx.editableFrom && w.date < date);
     const m = v1Measure(moved);
     if (!v1Ok(m.km ?? 0, m.minutes, v1LimitAt(ctx, date, future), moved.type === "RW")) continue;

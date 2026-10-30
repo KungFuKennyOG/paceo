@@ -5,7 +5,8 @@
  */
 import type { Activity } from "./activity.js";
 import { isHardDay, sortActivities } from "./activity.js";
-import { addDays, toDayNumber } from "./dates.js";
+import { addDays, toDayNumber, weekdayOf } from "./dates.js";
+import { maxMinutesOn } from "./plan-shape.js";
 import { matchActivities, type MatchResult, type WorkoutMatch } from "./matching.js";
 import { planPaces, prescriptionFor, type PaceSet } from "./prescription.js";
 import { isGeneralFitness, type GoalDistance, type Level, type Plan, type PlanInput, type PlanRequest, type PlanWeek, type VdotStatus } from "./plan-types.js";
@@ -55,6 +56,8 @@ export interface RuleContext {
   timeMode: boolean;
   /** The entered (or rebuild-derived) longest run, dated the day before the plan's start (§6.5 seed). */
   v1Seed: V1Seed;
+  /** §7.1 step 4: minutes a run may take on a date (Infinity = no limit). */
+  maxMinutesOn: (date: string) => number;
 }
 
 // ── PlanInput adapter ────────────────────────────────────────────────────────────────────────────
@@ -152,6 +155,7 @@ export function buildRuleContext(state: ReplanState, rawEvents: readonly CheckIn
     timeMode: rx.longBy === "time",
     // As in generatePlan: the entered longest run counts as a run on the day before the plan's start.
     v1Seed: { day: toDayNumber(state.input.today) - 1, km: state.input.longestRun30d.km, minutes: state.input.longestRun30d.minutes },
+    maxMinutesOn: (date) => maxMinutesOn(state.input, weekdayOf(date)),
   };
   if (facts.goalTimeS !== undefined) ctx.goalTimeS = facts.goalTimeS;
   const brk = detectBreak(runs, activities, today);

@@ -11,8 +11,13 @@
  * HIIT session and after external lower-body lifting. Step 5 (strength, §9.5) and fallbacks 4–5 run
  * after all runs are placed (strength-schedule.ts, plan.ts).
  *
- * TODO(§7.1 step 4): respect max_session_minutes_by_day.
+ * Specific weekdays (§2.3 "days available"): weekdayTemplate places the same roles on any set of
+ * weekdays, by days after the long run (D, reproducing the §7.2 rows when the days match them).
+ * §7.1 step 4 "respect max_session_minutes_by_day" is applied by the generator (plan.ts): it caps
+ * each run on its day, keeps quality off days it can't fit (`qualityFits`, fallbacks 1–2), shortens
+ * the LR (fallback 3) and reports the conflicts.
  */
+import { WEEKDAYS, type Weekday } from "./dates.js";
 
 export type SlotRole = "L" | "Q1" | "Q2" | "Q2_IF_EASY_LR" | "E" | "REC" | "E_SHORT" | "RW";
 
@@ -48,6 +53,14 @@ const GENERAL_FITNESS_2_DAY: readonly TemplateSlot[] = [slot(1, "E"), slot(6, "L
 /** Beginner ladder: Mon / Wed / Sat run/walk (§7.2). */
 const LADDER_TEMPLATE: readonly TemplateSlot[] = [slot(0, "RW"), slot(2, "RW"), slot(5, "RW")];
 
+/** The user's run weekdays and long-run weekday (§2.3), for weekdayTemplate. */
+export interface RunWeekdays {
+  days: readonly Weekday[];
+  longRunDay: Weekday;
+  /** §7.1 step 4 limit per weekday (Infinity = none): when only some days are used, roomier days win. */
+  maxMinutes?: (weekday: Weekday) => number;
+}
+
 export interface TemplateOptions {
   ladder?: boolean;
   noConsecutiveDays?: boolean;
@@ -55,6 +68,8 @@ export interface TemplateOptions {
   lrOffset?: number;
   /** General-fitness mode: the 2-day row is E + L (§7.2). */
   generalFitness?: boolean;
+  /** Run only on these weekdays (the long-run day always counts as one); replaces the §7.2 rows. */
+  weekdays?: RunWeekdays;
 }
 
 /**
@@ -65,10 +80,119 @@ export interface TemplateOptions {
 export function weekTemplate(runDays: number, opts: TemplateOptions = {}): TemplateSlot[] {
   const days = opts.noConsecutiveDays ? Math.min(3, runDays) : runDays;
   const n = Math.min(7, Math.max(2, days));
-  const t = opts.ladder ? LADDER_TEMPLATE : opts.generalFitness && n === 2 ? GENERAL_FITNESS_2_DAY : TEMPLATES[n];
+  const t = opts.weekdays
+    ? weekdayTemplate(opts.weekdays, runDays, opts)
+    : opts.ladder ? LADDER_TEMPLATE : opts.generalFitness && n === 2 ? GENERAL_FITNESS_2_DAY : TEMPLATES[n];
   if (!t) throw new RangeError(`no template for ${runDays} run days`);
   const shift = (opts.lrOffset ?? TEMPLATE_LR_COLUMN) - TEMPLATE_LR_COLUMN;
   return t.map((s) => ({ ...s, offset: (s.offset + shift + 7) % 7 })).sort((a, b) => a.offset - b.offset);
+}
+
+// ── specific weekdays (§2.3 days available, §7.1–7.2; D) ─────────────────────────────────────────
+
+/**
+ * Template columns (the §7.2 Sunday frame: long run = column 6, Mon = 0) of the run weekdays,
+ * long-run day included. Column c is (c + 1) % 7 days after the long run.
+ */
+export function weekdayColumns(w: RunWeekdays): number[] {
+  const lr = WEEKDAYS.indexOf(w.longRunDay);
+  const cols = [...w.days, w.longRunDay].map((d) => (WEEKDAYS.indexOf(d) - lr + TEMPLATE_LR_COLUMN + 7) % 7);
+  return [...new Set(cols)].sort((a, b) => a - b);
+}
+
+/** Weekday of a Sunday-frame template column for this long-run day. */
+export function columnWeekday(column: number, longRunDay: Weekday): Weekday {
+  return WEEKDAYS[(column - TEMPLATE_LR_COLUMN + WEEKDAYS.indexOf(longRunDay) + 7) % 7] as Weekday;
+}
+
+/** Days after the long run (0 = the LR day) of a Sunday-frame column. */
+const afterLr = (column: number) => (column + 1) % 7;
+const cyclicGap = (a: number, b: number) => Math.min(Math.abs(a - b), 7 - Math.abs(a - b));
+
+/** Lexicographic `a < b` for equal-length number keys. */
+function lexLess(a: readonly number[], b: readonly number[]): boolean {
+  const i = a.findIndex((v, j) => v !== b[j]);
+  return i >= 0 && (a[i] as number) < (b[i] as number);
+}
+
+function combinations<T>(xs: readonly T[], k: number): T[][] {
+  if (k === 0) return [[]];
+  if (k > xs.length) return [];
+  const [first, ...rest] = xs as [T, ...T[]];
+  return [...combinations(rest, k - 1).map((c) => [first, ...c]), ...combinations(rest, k)];
+}
+
+/**
+ * Choose `k` of the columns (fewer only when `noAdjacent` can't fit k), deterministic (D): fewest
+ * back-to-back pairs (the week repeats, so Sun → Mon counts), then the most time on the tightest
+ * day (`minutes`, counted up to 90 min), then the widest smallest gap, then a
+ * day that can hold quality (2–5 days after the LR), then the most days of the §7.2 row of that
+ * size, then the earliest columns.
+ */
+export function pickRunColumns(
+  columns: readonly number[],
+  k: number,
+  opts: { include?: number; noAdjacent?: boolean; minutes?: (column: number) => number } = {},
+): number[] {
+  const must = opts.include !== undefined && columns.includes(opts.include) ? [opts.include] : [];
+  const pool = columns.filter((c) => !must.includes(c));
+  for (let size = Math.min(k, columns.length); size >= must.length && size > 0; size--) {
+    let best: number[] | undefined;
+    let bestKey: number[] | undefined;
+    for (const combo of combinations(pool, size - must.length)) {
+      const set = [...combo, ...must].sort((a, b) => a - b);
+      const gaps = set.length < 2 ? [7] : set.map((c, i) => cyclicGap(c, set[(i + 1) % set.length] as number));
+      const adjacent = set.length < 2 ? 0 : set.length === 2 ? Number(gaps[0] === 1) : gaps.filter((g) => g === 1).length;
+      if (opts.noAdjacent && adjacent > 0) continue;
+      const row = new Set((TEMPLATES[size] ?? []).map((x) => x.offset));
+      const room = opts.minutes ? Math.min(90, ...set.map(opts.minutes)) : 90;
+      const key = [adjacent, -room, -Math.min(...gaps), set.some((c) => afterLr(c) >= 2 && afterLr(c) <= 5) ? 0 : 1, set.filter((c) => !row.has(c)).length, ...set];
+      if (!bestKey || lexLess(key, bestKey)) {
+        best = set;
+        bestKey = key;
+      }
+    }
+    if (best) return best;
+  }
+  return must;
+}
+
+/**
+ * §7.2 roles on any set of weekdays (D). By days after the long run (d):
+ *  - L on the long-run day;
+ *  - Q1 on the earliest day with 2 ≤ d ≤ 5 (≥ 48 h after the LR and before the next one, §7.1 step 3);
+ *    Q2 on the next such day ≥ 2 days after Q1 (5+ run days; "only with an easy LR" at 4, as §7.2);
+ *    no Q2 at 2–3 days, and none on the 2-day general-fitness row;
+ *  - the day after the LR is a recovery run at 6–7 days; at 7 days the day 2 days before the LR is
+ *    the short E; everything else is E.
+ * Placement still checks every constraint per week (placeWeek); a role is only a preference.
+ * Beginners in their first weeks, and the run/walk ladder, run on ≤ 3 non-consecutive days with
+ * the long-run day; a level cap (beginners 4) picks that many days (pickRunColumns).
+ */
+export function weekdayTemplate(w: RunWeekdays, runDays: number, opts: Pick<TemplateOptions, "ladder" | "noConsecutiveDays" | "generalFitness"> = {}): TemplateSlot[] {
+  const all = weekdayColumns(w);
+  const minutes = w.maxMinutes ? (c: number) => w.maxMinutes!(columnWeekday(c, w.longRunDay)) : undefined;
+  const pickOpts = minutes ? { minutes } : {};
+  // The ladder runs on the same ≤ 3 non-consecutive days (long-run day included) as the first
+  // post-ladder weeks, so the hand-over never puts two runs on back-to-back days (§7.1).
+  if (opts.ladder) return pickRunColumns(all, 3, { ...pickOpts, include: TEMPLATE_LR_COLUMN, noAdjacent: true }).map((c) => slot(c, "RW"));
+  const cols = opts.noConsecutiveDays
+    ? pickRunColumns(all, Math.min(3, runDays), { ...pickOpts, include: TEMPLATE_LR_COLUMN, noAdjacent: true })
+    : runDays < all.length
+      ? pickRunColumns(all, Math.max(1, runDays), { ...pickOpts, include: TEMPLATE_LR_COLUMN })
+      : all;
+  const n = cols.length;
+  const roles = new Map<number, SlotRole>([[TEMPLATE_LR_COLUMN, "L"]]);
+  const others = cols.filter((c) => c !== TEMPLATE_LR_COLUMN);
+  const q = others.filter((c) => afterLr(c) >= 2 && afterLr(c) <= 5).sort((a, b) => afterLr(a) - afterLr(b));
+  const q1 = q[0];
+  if (q1 !== undefined && !(opts.generalFitness && n <= 2)) {
+    roles.set(q1, "Q1");
+    const q2 = n >= 4 ? q.find((c) => afterLr(c) >= afterLr(q1) + MIN_KEY_GAP_DAYS) : undefined;
+    if (q2 !== undefined) roles.set(q2, n === 4 ? "Q2_IF_EASY_LR" : "Q2");
+  }
+  for (const c of others) if (!roles.has(c)) roles.set(c, n >= 6 && afterLr(c) === 1 ? "REC" : n === 7 && afterLr(c) === 5 ? "E_SHORT" : "E");
+  return cols.map((c) => slot(c, roles.get(c) as SlotRole));
 }
 
 export interface PlacementInput {
@@ -93,6 +217,11 @@ export interface PlacementInput {
   qualityBlockedDays?: ReadonlySet<number>;
   /** The subset of `qualityBlockedDays` caused only by flexible (non-locked) sessions, for fallback 5. */
   flexibleBlockedDays?: ReadonlySet<number>;
+  /**
+   * §7.1 step 4 "respect max_session_minutes_by_day": whether quality session `index` fits the
+   * time allowed on the day at `offset`. A day it doesn't fit is illegal for it (fallbacks 1–2).
+   */
+  qualityFits?: (index: number, offset: number) => boolean;
 }
 
 export interface Placement {
@@ -129,16 +258,19 @@ export function placeWeek(input: PlacementInput): Placement {
   if (input.longRun && lrSlot) {
     lrOffset = lrSlot.offset;
     taken.add(lrOffset);
-    keyDays.push(input.weekStartDay + lrOffset);
+    // Next week's LR falls on the same weekday: keep 48 h before it too (a rotated week can end
+    // the day before it, D).
+    keyDays.push(input.weekStartDay + lrOffset, input.weekStartDay + lrOffset + 7);
   }
   if (race !== undefined) keyDays.push(input.weekStartDay + race);
 
   const blocked = input.qualityBlockedDays ?? new Set<number>();
   const flexible = input.flexibleBlockedDays ?? new Set<number>();
   /** `ignore`: which cross-training blocks to disregard (only used to explain a conversion). */
-  const legal = (offset: number, ignore: "none" | "flexible" | "all" = "none") => {
+  const legal = (offset: number, ignore: "none" | "flexible" | "all" = "none", index?: number) => {
     const day = input.weekStartDay + offset;
     if (taken.has(offset)) return false;
+    if (index !== undefined && input.qualityFits && !input.qualityFits(index, offset)) return false;
     const xtOk = ignore === "all" || !blocked.has(day) || (ignore === "flexible" && flexible.has(day));
     if (!xtOk) return false;
     if (input.raceDay !== undefined && input.raceDay - day < (input.minDaysBeforeRace ?? MIN_KEY_GAP_DAYS)) return false;
@@ -154,10 +286,12 @@ export function placeWeek(input: PlacementInput): Placement {
       .map((s) => s.offset)
       .sort((a, b) => Math.abs(a - (preferred ?? 1)) - Math.abs(b - (preferred ?? 1)) || a - b);
     let chosen: number | undefined;
-    if (preferred !== undefined && legal(preferred)) {
+    if (preferred !== undefined && legal(preferred, "none", i)) {
       chosen = preferred;
     } else {
-      chosen = candidates.find((o) => legal(o));
+      // Only the day's time limit stands in the way: say so, for the conflict report (§7.1 step 4).
+      if (preferred !== undefined && legal(preferred)) trace.push(`S:max_minutes_blocks_d${preferred}`);
+      chosen = candidates.find((o) => legal(o, "none", i));
       if (chosen !== undefined) trace.push(`S:fallback1:move_${label}->d${chosen}`);
     }
     if (chosen === undefined) {
