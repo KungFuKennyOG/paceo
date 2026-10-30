@@ -3,25 +3,49 @@
  *
  * generatePlan is a pure function of its input: no clock, no randomness, no I/O.
  * Pipeline: feasibility (§6.2) → shape (phases §6.3, ladder §6.9, cutbacks §6.7, volume §6.5,
- * taper §6.8) → per week: quality choice (§6.4, P3) → placement (§7.1) → long run (§6.6) →
- * workouts (§6.10) → easy spreading (S3) → V1 on every run (§6.5).
+ * taper §6.8; or general-fitness blocks §6.1) → locked cross-training expanded onto days (§7.1
+ * step 1, §10.2) → per week: quality choice (§6.4, P3, ½ key per hard cross-training day) →
+ * placement (§7.1, quality kept off hard-cross-training days) → long run (§6.6) → workouts (§6.10)
+ * → easy spreading (S3) → V1 on every run (§6.5) → strength placement over the finished runs
+ * (§7.1 step 5, §9) → conflicts and fallback 5–6 reports.
  *
- * TODO(§6.1): general-fitness mode (BASE weeks currently run as E + strides + easy LR).
  * TODO(§8): replanning; the TT result should trigger a replan into pace mode.
- * TODO(§9): strength placement. TODO(§10): locked cross-training. TODO(§4.8): heat; HR targets beyond the DSL fallback.
+ * TODO(§6.3): BASE weeks of > 24-week race plans still run as E + strides + easy LR (strength uses the general row).
+ * TODO(§4.8): heat; HR targets beyond the DSL fallback.
  */
 import type { PlannedWorkout } from "./workout.js";
-import type { Phase, Plan, PlanInput, PlanSummary, PlanWeek, VolumeFlag } from "./plan-types.js";
-import { planCalendar, fromDayNumber, toDayNumber, type PlanCalendar } from "./dates.js";
+import type {
+  Feasibility,
+  GeneralFitnessInput,
+  Phase,
+  Plan,
+  PlanInput,
+  PlanMode,
+  PlanRequest,
+  PlanSummary,
+  PlanWeek,
+  ScheduleConflict,
+  VolumeFlag,
+} from "./plan-types.js";
+import { isGeneralFitness } from "./plan-types.js";
+import { planCalendar, fromDayNumber, toDayNumber, weekdayOf, type PlanCalendar } from "./dates.js";
 import { formatDuration } from "./units.js";
 import { checkFeasibility, levelBlocked, predictedGoalTimeS } from "./feasibility.js";
-import { easyMaxKm, effectiveRunDays, planShape, slotMaxKm, type PlanShape, type WeekKind } from "./plan-shape.js";
+import {
+  easyMaxKm,
+  effectiveRunDays,
+  generalFitnessShape,
+  planShape,
+  slotMaxKm,
+  type PlanShape,
+  type WeekKind,
+} from "./plan-shape.js";
 import { midPace, prescriptionFor, type Prescription } from "./prescription.js";
 import {
   longRunMayBeQuality,
+  keyBudget,
   phaseEmphasis,
   qualityAllowance,
-  qualityBudget,
   substituteQuality,
   weeklyQualityCount,
   type QualityAllowance,
@@ -57,6 +81,19 @@ import {
   type V1Seed,
   V1_FACTOR,
 } from "./v1.js";
+import {
+  expandLockedEvents,
+  hasTrunkLoadingCrossTraining,
+  isLowerLift,
+  recordConflict,
+  type CrossTrainingSession,
+} from "./cross-training.js";
+import { scheduleStrength } from "./strength-schedule.js";
+import {
+  generalFitnessAsRaceInput,
+  generalFitnessCalendar,
+  generalFitnessWeeks,
+} from "./general-fitness.js";
 
 /**
  * L2: the peak long run falls 3–5 weeks before the race. A build-week long run less than 21 days
@@ -68,6 +105,7 @@ const PRE_TAPER_LR_FRACTION = 0.85;
 const MAX_STRIDE_SESSIONS = 2;
 
 interface Env {
+  mode: PlanMode;
   input: PlanInput;
   userId: string;
   cal: PlanCalendar;
@@ -79,6 +117,12 @@ interface Env {
   /** V1 time variant applies when the plan prescribes long runs in minutes (§6.5). */
   timeMode: boolean;
   seed: V1Seed;
+  /** Locked cross-training and external lifting on its dates (§7.1 step 1). */
+  xt: CrossTrainingSession[];
+  /** Days that can't hold a quality run because of cross-training / external lifting (§7.1 step 4, §10.2, ST-4/ST-7). */
+  qualityBlocked: Set<number>;
+  /** Subset of qualityBlocked caused only by flexible sessions (fallback 5). */
+  flexibleBlocked: Set<number>;
 }
 
 interface State {
@@ -104,6 +148,8 @@ interface WeekInfo {
   isRace: boolean;
   phaseIdx: number;
   phaseLen: number;
+  /** Quality runs allowed under the cap of 3 key sessions after the LR and this week's hard cross-training (§6.4). */
+  budget: number;
   /** Caps that pushed planned km away from the target this week (rule IDs, for VolumeFlag). */
   caps: Set<string>;
 }
@@ -120,13 +166,42 @@ interface QualityPick {
 
 // ── public API ───────────────────────────────────────────────────────────────────────────────────
 
-export function generatePlan(input: PlanInput): Plan {
+/**
+ * Race mode (PlanInput) or general-fitness mode (GeneralFitnessInput, §6.1). Existing race callers
+ * are unchanged; `isGeneralFitness` tells the two apart.
+ */
+export function generatePlan(input: PlanRequest): Plan {
+  if (isGeneralFitness(input)) return generateGeneralFitness(input);
   const feasibility = checkFeasibility(input);
   const cal = planCalendar(input.today, input.raceDate, input.longRunDay);
   if (cal.weeks < 2 || levelBlocked(input.level, input.goal.distance)) {
-    return { feasibility, weeks: [], summary: emptySummary(input, cal, feasibility.status) };
+    return { feasibility, weeks: [], summary: emptySummary(input, cal, feasibility.status, "race") };
   }
-  const env = makeEnv(effectiveInput(input, feasibility), cal);
+  const env = makeEnv(effectiveInput(input, feasibility), cal, planShape(input, cal.weeks), "race");
+  return runPlan(env, feasibility, input);
+}
+
+/** §6.1 general fitness: N weeks from today, rolling blocks, no taper, no race. */
+function generateGeneralFitness(gf: GeneralFitnessInput): Plan {
+  const input = generalFitnessAsRaceInput(gf);
+  const cal = generalFitnessCalendar(gf);
+  const shape = generalFitnessShape(input, cal.weeks, gf.goal);
+  const feasibility: Feasibility = {
+    status: "ok",
+    reasons: [
+      {
+        code: "general_fitness",
+        status: "info",
+        message: `General fitness: ${generalFitnessWeeks(gf.goal)} weeks of ${shape.cutback.every - 1}+1 blocks toward ${shape.peakCapKm.toFixed(0)} km/week; no race, no taper.`,
+      },
+    ],
+    alternatives: [],
+    reach: { peakLongRunKm: shape.l1TargetKm, l1TargetKm: shape.l1TargetKm, ratio: 1 },
+  };
+  return runPlan(makeEnv(input, cal, shape, "general_fitness"), feasibility, input);
+}
+
+function runPlan(env: Env, feasibility: Feasibility, input: PlanInput): Plan {
   const st: State = {
     history: [],
     keyDays: [],
@@ -136,9 +211,33 @@ export function generatePlan(input: PlanInput): Plan {
     peakLrKm: 0,
     prevPlannedKm: 0,
   };
-  const weeks: PlanWeek[] = [];
-  for (let w = 1; w <= cal.weeks; w++) weeks.push(planWeek(env, st, w));
-  return { feasibility, weeks, summary: summarize(env, weeks, feasibility.status, input) };
+  const runWeeks: PlanWeek[] = [];
+  for (let w = 1; w <= env.cal.weeks; w++) runWeeks.push(planWeek(env, st, w));
+
+  const conflicts: ScheduleConflict[] = [];
+  crossTrainingConflicts(env, runWeeks, conflicts);
+  const strength = scheduleStrength(
+    {
+      userId: env.userId,
+      config: input.strength,
+      level: input.level,
+      conservative: input.conservative ?? false,
+      mode: env.mode,
+      distance: env.input.goal.distance,
+      ...(env.mode === "race" ? { raceDay: env.cal.raceDay } : {}),
+      firstDay: env.cal.startDay,
+      trunkLoadingXt: hasTrunkLoadingCrossTraining(input.lockedEvents),
+    },
+    runWeeks,
+    env.xt,
+  );
+  conflicts.push(...strength.conflicts);
+  const weeks = strength.weeks;
+  const summary = summarize(env, weeks, feasibility.status, input);
+  summary.notes.push(...strength.notes);
+  summary.conflicts = conflicts;
+  for (const c of conflicts) summary.notes.push(`Conflict ${c.code} (${c.weekday}, weeks ${c.weeks.join(",")}): ${c.message}${c.suggestion ? ` ${c.suggestion}` : ""}`);
+  return { feasibility, weeks, summary };
 }
 
 /**
@@ -152,23 +251,63 @@ function effectiveInput(input: PlanInput, feasibility: Plan["feasibility"]): Pla
   return { ...input, goal: { ...input.goal, timeS: slower.goalTimeS } };
 }
 
-function makeEnv(input: PlanInput, cal: PlanCalendar): Env {
-  const shape = planShape(input, cal.weeks);
+function makeEnv(input: PlanInput, cal: PlanCalendar, shape: PlanShape, mode: PlanMode): Env {
   const runDays = effectiveRunDays(input.level, input.runDays);
   const rx = prescriptionFor(input.level, input.vdotStatus, shape.paces);
+  const lastDay = cal.startDay + 7 * cal.weeks - 1;
+  const xt = expandLockedEvents(input.lockedEvents ?? [], cal.startDay, lastDay, mode === "race" ? cal.raceDay : undefined);
+  const { blocked, flexible } = qualityBlockedDays(xt);
   return {
+    mode,
     input,
     userId: input.userId ?? "me",
     cal,
     shape,
     rx,
     allow: qualityAllowance(input.level, runDays, input.monthsRunning),
-    budget: qualityBudget(input.lockedEvents),
+    budget: keyBudget(0),
     runDays,
     timeMode: rx.longBy === "time",
     // The entered longest run is "within the last 30 days"; we date it yesterday (D).
     seed: { day: toDayNumber(input.today) - 1, km: input.longestRun30d.km, minutes: input.longestRun30d.minutes },
+    xt,
+    qualityBlocked: blocked,
+    flexibleBlocked: flexible,
   };
+}
+
+/**
+ * §7.1 step 4 / §10.2: no quality run on the day of, or within 24 h after, a hard cross-training,
+ * team-sport or HIIT session (D: session times aren't known, so "same day" counts too; ST-7 also
+ * forbids hard cross-training + a hard run + lower lifting on one day). §9.6: external lower/full
+ * lifting moves quality off the next day (ST-4) and, with hard cross-training the same day, off that day (ST-7).
+ */
+function qualityBlockedDays(xt: readonly CrossTrainingSession[]): { blocked: Set<number>; flexible: Set<number> } {
+  const byDay = new Map<number, { locked: boolean }[]>();
+  const add = (day: number, locked: boolean) => byDay.set(day, [...(byDay.get(day) ?? []), { locked }]);
+  const hardDays = new Set(xt.filter((x) => x.hard).map((x) => toDayNumber(x.date)));
+  for (const x of xt) {
+    const day = toDayNumber(x.date);
+    if (x.blocksNextDayQuality) {
+      add(day, x.locked);
+      add(day + 1, x.locked);
+    }
+    if (isLowerLift(x)) {
+      add(day + 1, x.locked);
+      if (hardDays.has(day)) add(day, x.locked);
+    }
+  }
+  const blocked = new Set(byDay.keys());
+  const flexible = new Set([...byDay].filter(([, causes]) => causes.every((c) => !c.locked)).map(([d]) => d));
+  return { blocked, flexible };
+}
+
+/** Hard cross-training key cost (§6.4) of the sessions in [startDay, startDay + 6]. */
+function crossTrainingKeyCost(env: Env, startDay: number): number {
+  return env.xt.reduce((a, x) => {
+    const d = toDayNumber(x.date);
+    return d >= startDay && d < startDay + 7 ? a + x.keyCost : a;
+  }, 0);
 }
 
 // ── one week ─────────────────────────────────────────────────────────────────────────────────────
@@ -176,17 +315,24 @@ function makeEnv(input: PlanInput, cal: PlanCalendar): Env {
 function weekInfo(env: Env, w: number): WeekInfo {
   const byWeek = env.shape.phases.byWeek;
   const phase = byWeek[w - 1] as Phase;
-  const first = byWeek.indexOf(phase);
+  // Index/length within the contiguous run of this phase (general-fitness phases repeat, D).
+  let first = w - 1;
+  while (first > 0 && byWeek[first - 1] === phase) first--;
+  let last = w - 1;
+  while (last + 1 < byWeek.length && byWeek[last + 1] === phase) last++;
+  const startDay = env.cal.startDay + 7 * (w - 1);
+  const race = env.mode === "race";
   return {
     w,
     kind: env.shape.kinds[w - 1] as WeekKind,
     phase,
     targetKm: env.shape.targets[w - 1] as number,
-    startDay: env.cal.startDay + 7 * (w - 1),
-    weeksOut: env.cal.weeks - w + 1,
-    isRace: w === env.cal.weeks,
+    startDay,
+    weeksOut: race ? env.cal.weeks - w + 1 : Infinity,
+    isRace: race && w === env.cal.weeks,
     phaseIdx: w - 1 - first,
-    phaseLen: byWeek.filter((p) => p === phase).length,
+    phaseLen: last - first + 1,
+    budget: keyBudget(crossTrainingKeyCost(env, startDay)),
     caps: new Set(),
   };
 }
@@ -221,6 +367,10 @@ function planWeek(env: Env, st: State, w: number): PlanWeek {
     isTaper: info.kind === "taper",
     isLadder: info.kind === "ladder",
     workouts,
+    crossTraining: env.xt.filter((x) => {
+      const d = toDayNumber(x.date);
+      return d >= info.startDay && d < info.startDay + 7;
+    }),
     notes,
   };
   const flag = volumeFlag(info, plannedKm);
@@ -331,6 +481,7 @@ function runWeek(env: Env, st: State, info: WeekInfo, notes: string[]): Placed[]
   const slots = weekTemplate(env.runDays, {
     noConsecutiveDays: input.level === "beginner" && info.w <= 4,
     lrOffset: env.cal.lrOffset,
+    generalFitness: env.mode === "general_fitness",
   });
   // T3: no long run inside the last-hard-session window (e.g. a Saturday LR before a Sunday race).
   const lrDaysToRace = env.cal.raceDay - (info.startDay + env.cal.lrOffset);
@@ -343,6 +494,8 @@ function runWeek(env: Env, st: State, info: WeekInfo, notes: string[]): Placed[]
     priorKeyDays: st.keyDays,
     raceDay: env.cal.raceDay,
     minDaysBeforeRace: lastHardSessionDays(input.goal.distance).min,
+    qualityBlockedDays: env.qualityBlocked,
+    flexibleBlockedDays: env.flexibleBlocked,
   });
   notes.push(...placement.trace);
 
@@ -455,9 +608,11 @@ function chooseQuality(env: Env, info: WeekInfo, lrQuality: boolean): QualityPic
   const { input } = env;
   if (info.kind === "tt") return [{ kind: "TT", trace: ["C2:tt_counts_as_cutback"] }];
   if (info.phase === "BASE" || info.phase === "FI") return [];
+  // §7.2: the 2-day general-fitness row has no Q slot (E + L only).
+  if (env.mode === "general_fitness" && env.runDays <= 2) return [];
   if (info.isRace && env.cal.raceOffset < lastHardSessionDays(input.goal.distance).min) return [];
 
-  let n = weeklyQualityCount(env.allow, lrQuality, env.budget);
+  let n = weeklyQualityCount(env.allow, lrQuality, info.budget);
   if (info.kind === "cutback" || info.kind === "taper") n = Math.min(1, n);
   const emph = phaseEmphasis(input.goal.distance, info.phase, info.phaseIdx, info.phaseLen);
   if (n === 0 || !emph) return [];
@@ -467,6 +622,7 @@ function chooseQuality(env: Env, info: WeekInfo, lrQuality: boolean): QualityPic
   return kinds.map((k, i) => {
     const sub = substituteQuality(k, input.level, input.vdotStatus, info.phase);
     const trace = [`P3:${info.phase}:${dist}:${sub.kind}`, `${env.allow.rule}:Q${i + 1}`];
+    if (info.budget < env.budget) trace.push(`§6.4:hard_xt_half_key(budget=${info.budget})`);
     if (sub.rule) trace.push(sub.rule);
     if (info.kind === "cutback") trace.push("C1:cutback_quality");
     if (info.kind === "taper") trace.push("T3:goal_pace");
@@ -717,6 +873,7 @@ function fitEasy(ctx: W.BuildContext, km: number, opts: W.EasyOptions, limit: V1
 
 function summarize(env: Env, weeks: PlanWeek[], status: string, input: PlanInput): PlanSummary {
   const { shape, cal } = env;
+  const endDate = fromDayNumber(cal.startDay + 7 * cal.weeks - 1);
   let peakLr = 0;
   let peakLrWeek = 0;
   for (const wk of weeks) {
@@ -738,13 +895,17 @@ function summarize(env: Env, weeks: PlanWeek[], status: string, input: PlanInput
         flagged.map((w) => `wk ${w.index} (${w.volumeFlag!.reasons.join(", ")})`).join("; "),
     );
   }
-  if (shape.ttWeek !== undefined) notes.push(`Week ${shape.ttWeek}: 3K time trial; replan into pace mode with the result (§4.2, §8).`);
-  if (input.lockedEvents?.length) notes.push("Locked cross-training isn't scheduled yet (§10 TODO); only hard sessions reduce the key-session budget.");
+  const tts = weeks.filter((w) => w.workouts.some((x) => x.type === "TT")).map((w) => w.index);
+  if (tts.length > 0) notes.push(`Week ${tts.join(", ")}: 3K time trial; replan into pace mode with the result (§4.2, §8).`);
+  if (env.mode === "general_fitness") notes.push(`§6.1: general fitness, ${shape.cutback.every - 1}+1 blocks, no taper.`);
+  notes.push(...crossTrainingNotes(env, input));
   return {
+    mode: env.mode,
+    endDate,
     weeks: weeks.length,
     leadInDays: cal.leadInDays,
     startDate: fromDayNumber(cal.startDay),
-    raceDate: input.raceDate,
+    raceDate: env.mode === "race" ? input.raceDate : endDate,
     distance: input.goal.distance,
     phaseSplit: phaseCounts(shape.phases.byWeek),
     ladderWeeks: shape.ladderWeeks,
@@ -759,8 +920,10 @@ function summarize(env: Env, weeks: PlanWeek[], status: string, input: PlanInput
   };
 }
 
-function emptySummary(input: PlanInput, cal: PlanCalendar, status: string): PlanSummary {
+function emptySummary(input: PlanInput, cal: PlanCalendar, status: string, mode: PlanMode): PlanSummary {
   return {
+    mode,
+    endDate: input.raceDate,
     weeks: 0,
     leadInDays: cal.leadInDays,
     startDate: fromDayNumber(cal.startDay),
@@ -775,8 +938,110 @@ function emptySummary(input: PlanInput, cal: PlanCalendar, status: string): Plan
     peakLongRunWeek: 0,
     totalKm: 0,
     volumeFlags: [],
+    conflicts: [],
     notes: [`feasibility:${status}`, "No plan generated: see feasibility."],
   };
+}
+
+// ── cross-training reports (§7.1 fallbacks 5–6, §10.2) ───────────────────────────────────────────
+
+const WD = (day: number) => {
+  const w = weekdayOf(fromDayNumber(day));
+  return w.slice(0, 1).toUpperCase() + w.slice(1);
+};
+
+/**
+ * Locked sessions are placed first and never moved (§10.2), so what the scheduler can't fix is
+ * reported: a hard session the day before the LR or race, and quality runs lost only to a flexible
+ * session (fallback 5, with a suggested day; fallback 6 otherwise).
+ */
+function crossTrainingConflicts(env: Env, weeks: readonly PlanWeek[], out: ScheduleConflict[]): void {
+  const lrDays = new Set<number>();
+  const qualityDays = new Set<number>();
+  for (const w of weeks.flatMap((x) => x.workouts)) {
+    const d = toDayNumber(w.date);
+    if (w.type === "L" || w.type === "RACE") lrDays.add(d);
+    else if (w.flags.key_session) qualityDays.add(d);
+  }
+  const weekOf = (day: number) => weeks.find((w) => day >= toDayNumber(w.startDate) && day < toDayNumber(w.startDate) + 7);
+  /** A day in the same plan week where this session breaks nothing (nearest first). */
+  const suggestDay = (x: CrossTrainingSession, day: number, start: number, avoid: readonly number[] = []): number | undefined => {
+    const cands = Array.from({ length: 7 }, (_, i) => start + i)
+      .filter((c) => c !== day && !lrDays.has(c) && !avoid.includes(c))
+      .filter((c) => !(x.hard && lrDays.has(c + 1)))
+      .filter((c) => !x.blocksNextDayQuality || (!qualityDays.has(c) && !qualityDays.has(c + 1)))
+      .sort((a, b) => Math.abs(a - day) - Math.abs(b - day) || a - b);
+    return cands[0];
+  };
+
+  for (const x of env.xt) {
+    const day = toDayNumber(x.date);
+    const wk = weekOf(day);
+    if (!wk || !x.hard) continue;
+    if (!lrDays.has(day + 1)) continue;
+    const alt = x.locked ? undefined : suggestDay(x, day, toDayNumber(wk.startDate));
+    recordConflict(out, {
+      code: "XT:hard_day_before_LR",
+      weekday: x.weekday,
+      week: wk.index,
+      message: `${x.name} (hard) on ${WD(day)} is the day before the ${lrDays.has(day + 1) && day + 1 === env.cal.raceDay ? "race" : "long run"} (§7.1: no hard cross-training the day before the LR).${x.locked ? " It's locked, so it stays: keep it easy that day if you can." : ""}`,
+      ...(alt !== undefined ? { suggestion: `§7.1 fallback 5: move it to ${WD(alt)}.` } : {}),
+    });
+  }
+
+  // T3: the last hard session is 7–10 days out; a hard locked session in the final 3 days is flagged (D).
+  if (env.mode === "race") {
+    for (const x of env.xt) {
+      const day = toDayNumber(x.date);
+      const wk = weekOf(day);
+      if (!wk || !x.hard || day + 1 === env.cal.raceDay || env.cal.raceDay - day > 3) continue;
+      recordConflict(out, {
+        code: "XT:hard_in_race_week",
+        weekday: x.weekday,
+        week: wk.index,
+        message: `${x.name} (hard) on ${WD(day)} is ${env.cal.raceDay - day} days before the race: keep it easy or skip it that week (§6.8 T3).`,
+      });
+    }
+  }
+
+  for (const wk of weeks) {
+    const start = toDayNumber(wk.startDate);
+    for (const n of wk.notes) {
+      const m = /^S:fallback([56]):(?:flexible|locked)_xt_blocks_d(\d)$/.exec(n);
+      if (!m) continue;
+      const flexibleOnly = m[1] === "5";
+      const qDay = start + Number(m[2]);
+      for (const x of env.xt) {
+        const d = toDayNumber(x.date);
+        const blocks = (x.blocksNextDayQuality && (d === qDay || d === qDay - 1)) || (isLowerLift(x) && d === qDay - 1);
+        if (!blocks || (flexibleOnly && x.locked)) continue;
+        const alt = x.locked ? undefined : suggestDay(x, d, start, [qDay - 1, qDay]);
+        recordConflict(out, {
+          code: x.locked ? "XT:locked_blocks_quality" : "XT:flexible_blocks_quality",
+          weekday: x.weekday,
+          week: wk.index,
+          message: `${x.name} on ${WD(d)} turned a quality run into easy + strides (no quality on or within 24 h after a hard session, or the day after lower-body lifting).`,
+          ...(alt !== undefined ? { suggestion: `§7.1 fallback 5: move it to ${WD(alt)}.` } : {}),
+        });
+      }
+    }
+  }
+}
+
+/** Plan-level cross-training notes: race-day sessions skipped, load share vs the C1 flag. */
+function crossTrainingNotes(env: Env, input: PlanInput): string[] {
+  const events = input.lockedEvents ?? [];
+  if (events.length === 0) return [];
+  const notes: string[] = [];
+  const raceWeekday = env.mode === "race" ? weekdayOf(input.raceDate) : undefined;
+  for (const e of events) {
+    if (e.weekday === raceWeekday) notes.push(`§10.2: ${e.name ?? e.activity} is skipped on race day.`);
+  }
+  const hard = env.xt.filter((x) => x.keyCost > 0);
+  if (hard.length > 0) {
+    notes.push(`§6.4: each hard cross-training day counts as ½ key session (${hard[0]!.name} on ${hard[0]!.weekday}).`);
+  }
+  return notes;
 }
 
 function phaseCounts(byWeek: readonly Phase[]): Record<Phase, number> {
