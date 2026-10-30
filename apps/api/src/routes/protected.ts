@@ -17,6 +17,9 @@ import {
   PlanPreviewResponse,
   PlanResponse,
   Profile,
+  ProposalDecisionRequest,
+  ProposalDecisionResponse,
+  ProposalListResponse,
   PushSubscribeRequest,
   PushUnsubscribeRequest,
   ROUTES,
@@ -43,7 +46,15 @@ import {
 } from "../repo/index.js";
 import { createInvite, SESSION_COOKIE, toUser, userForToken } from "../services/auth.js";
 import { connectIntervals, disconnectIntervals, PROVIDER, toConnectionStatus, userTimezone } from "../services/connection.js";
-import { generateAndStore, loadProfile, previewPlan, screeningOutcome, toPlanResponse } from "../services/plan.js";
+import {
+  generateAndStore,
+  loadProfile,
+  pendingProposals,
+  previewPlan,
+  respondToProposal,
+  screeningOutcome,
+  toPlanResponse,
+} from "../services/plan.js";
 import {
   deleteTestWorkout,
   removeUpcomingFromSink,
@@ -259,6 +270,18 @@ export function protectedRoutes(svc: Services): FastifyPluginAsync {
     app.post(ROUTES.checkIn.path, async (req) => {
       const body = parseInput(CheckInRequest, req.body);
       return output(CheckInResponse, await recordCheckIn(svc, me(req).id, body));
+    });
+
+    // ── proposals ──
+    app.get(ROUTES.proposals.path, async (req) => {
+      return output(ProposalListResponse, { items: await pendingProposals(svc, me(req).id) });
+    });
+
+    app.post<{ Params: { id: string } }>(ROUTES.respondProposal.path, async (req) => {
+      const body = parseInput(ProposalDecisionRequest, req.body);
+      const id = req.params.id;
+      if (!id || id.length > 200) throw new AppError(404, "not_found", "Proposal not found.");
+      return output(ProposalDecisionResponse, await respondToProposal(svc, me(req).id, id, body.accept));
     });
 
     // ── activities / sync ──

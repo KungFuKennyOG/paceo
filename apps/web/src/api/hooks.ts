@@ -14,6 +14,7 @@ export const qk = {
   workoutsAll: ["workouts"] as const,
   workout: (id: string) => ["workout", id] as const,
   activities: (from: string, to: string) => ["activities", from, to] as const,
+  proposals: ["proposals"] as const,
 };
 
 function retry(count: number, err: unknown): boolean {
@@ -66,6 +67,11 @@ export function useActivities(from: string, to: string, enabled = true) {
   return useQuery({ queryKey: qk.activities(from, to), queryFn: () => api.activities(from, to), retry, enabled });
 }
 
+/** Pending replan proposals (§8): VDOT change, goal change, realignment. */
+export function useProposals(enabled = true) {
+  return useQuery({ queryKey: qk.proposals, queryFn: api.proposals, retry, enabled, staleTime: 30_000 });
+}
+
 export function useResend() {
   const qc = useQueryClient();
   return useMutation({
@@ -87,6 +93,7 @@ export function useInvalidatePlanData() {
       qc.invalidateQueries({ queryKey: qk.workoutsAll }),
       qc.invalidateQueries({ queryKey: ["workout"] }),
       qc.invalidateQueries({ queryKey: ["activities"] }),
+      qc.invalidateQueries({ queryKey: qk.proposals }),
     ]);
 }
 

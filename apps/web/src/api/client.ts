@@ -17,6 +17,8 @@ import {
   PlanPreviewResponse,
   PlanResponse,
   Profile,
+  ProposalDecisionResponse,
+  ProposalListResponse,
   ROUTES,
   SyncResponse,
   TestWorkoutResponse,
@@ -209,6 +211,9 @@ export const api = {
   vapidKey: () => call("vapidKey", { schema: VapidKeyResponse }),
   pushSubscribe: (body: PushSubscribeRequest) => call<void>("pushSubscribe", { body }),
   pushUnsubscribe: (endpoint: string) => call<void>("pushUnsubscribe", { body: { endpoint } }),
+  proposals: () => call("proposals", { schema: ProposalListResponse }),
+  respondProposal: (id: string, accept: boolean) =>
+    call("respondProposal", { params: { id }, body: { accept }, schema: ProposalDecisionResponse }),
 };
 
 export function errorMessage(err: unknown): string {

@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { formatDistance } from "../lib/units";
 import { InlineError } from "./States";
+import { GarminAttribution } from "./WorkoutBits";
 import { useUnits } from "../api/hooks";
 
 /** Manual FIT upload (§3.4), for any watch. */
@@ -37,9 +38,12 @@ export function FitUpload({ compact = false }: { compact?: boolean }) {
         </button>
       </div>
       {upload.isSuccess && (
-        <span className="small" role="status">
-          Uploaded {upload.data.name ?? "activity"}
-          {upload.data.distanceM ? ` · ${formatDistance(upload.data.distanceM, units)}` : ""}.
+        <span className="stack stack--tight">
+          <span className="small" role="status">
+            Uploaded {upload.data.name ?? "activity"}
+            {upload.data.distanceM ? ` · ${formatDistance(upload.data.distanceM, units)}` : ""}.
+          </span>
+          <GarminAttribution activity={upload.data} />
         </span>
       )}
       <InlineError error={upload.error} />

@@ -1,7 +1,7 @@
 /**
  * FIT activity → summary, with Garmin's official SDK (@garmin/fitsdk, spec §2.6, §3.4).
- * Accepts raw or gzipped FIT. Only the session summary is extracted for now; laps and samples stay
- * in the stored original file for later (§2.2 laps/samples).
+ * Accepts raw or gzipped FIT. parseFit extracts the session summary; parseFitStreams extracts the
+ * device laps and the record samples (§2.2 laps/samples, §4.9) for the engine's Activity.
  */
 import { gunzipSync } from "node:zlib";
 import * as fitsdk from "@garmin/fitsdk";
@@ -72,13 +72,15 @@ const dateOf = (v: unknown): Date | null => {
   return null;
 };
 
-export function parseFit(input: Buffer): FitSummary {
+type Messages = Record<string, unknown[] | undefined>;
+
+function decodeFit(input: Buffer): { messages: Messages; errors: unknown[] } {
   const bytes = maybeGunzip(input);
   if (!isFitBytes(bytes)) throw new FitParseError("not a FIT file");
   const decoder = new sdk.Decoder(sdk.Stream.fromBuffer(bytes));
   if (!decoder.isFIT()) throw new FitParseError("not a FIT file");
   if (!decoder.checkIntegrity()) throw new FitParseError("FIT file failed its integrity check (truncated or corrupt)");
-  const { messages, errors } = decoder.read({
+  return decoder.read({
     applyScaleAndOffset: true,
     expandSubFields: true,
     expandComponents: true,
@@ -86,6 +88,10 @@ export function parseFit(input: Buffer): FitSummary {
     convertDateTimesToDates: true,
     mergeHeartRates: false,
   });
+}
+
+export function parseFit(input: Buffer): FitSummary {
+  const { messages, errors } = decodeFit(input);
   const session = (messages.sessionMesgs?.[0] ?? null) as Rec | null;
   const activity = (messages.activityMesgs?.[0] ?? null) as Rec | null;
   const fileId = (messages.fileIdMesgs?.[0] ?? null) as Rec | null;
@@ -119,5 +125,107 @@ export function parseFit(input: Buffer): FitSummary {
     manufacturer: str(fileId?.manufacturer),
     product: str(fileId?.garminProduct) ?? str(fileId?.productName) ?? str(fileId?.product),
     serialNumber: str(fileId?.serialNumber),
+  };
+}
+
+// ── laps and samples ─────────────────────────────────────────────────────────────────────────────
+
+/** One record sample, seconds since the activity start. Same shape as the engine's ActivitySample. */
+export interface FitSample {
+  t: number;
+  distM?: number;
+  altM?: number;
+  speedMps?: number;
+  hr?: number;
+  tempC?: number;
+}
+
+export interface FitLap {
+  startS: number;
+  durationS: number;
+  distanceM: number;
+  avgHr?: number;
+}
+
+export interface FitStreams {
+  laps: FitLap[];
+  samples: FitSample[];
+  maxHr: number | null;
+  elevationGainM: number | null;
+  /** FIT session sub_sport, e.g. "treadmill", "track", "trail", "generic". */
+  subSport: string | null;
+  manufacturer: string | null;
+  /** True when the records carry altitude. */
+  hasAltitude: boolean;
+}
+
+/**
+ * Longest activity kept at 1 Hz; longer ones are thinned to every n-th second so a 24 h ultra stays
+ * ~43k samples (D).
+ */
+export const MAX_SAMPLES = 43_200;
+
+/**
+ * Device laps and ≤ 1 Hz samples. Sub-second records are thinned to the first one in each second;
+ * records before the start or without a timestamp are dropped.
+ */
+export function parseFitStreams(input: Buffer): FitStreams {
+  const { messages } = decodeFit(input);
+  const session = (messages.sessionMesgs?.[0] ?? null) as Rec | null;
+  const fileId = (messages.fileIdMesgs?.[0] ?? null) as Rec | null;
+  const records = (messages.recordMesgs ?? []) as Rec[];
+  const start = dateOf(session?.startTime) ?? dateOf(records[0]?.timestamp);
+  if (!start) throw new FitParseError("FIT file has no start time");
+  const t0 = start.getTime();
+
+  const lastTs = dateOf(records[records.length - 1]?.timestamp);
+  const spanS = lastTs ? (lastTs.getTime() - t0) / 1000 : 0;
+  const every = Math.max(1, Math.ceil(spanS / MAX_SAMPLES));
+  const samples: FitSample[] = [];
+  let lastT = -Infinity;
+  let hasAltitude = false;
+  for (const r of records) {
+    const ts = dateOf(r.timestamp);
+    if (!ts) continue;
+    const t = Math.round((ts.getTime() - t0) / 1000);
+    if (t < 0 || t < lastT + every) continue;
+    lastT = t;
+    const s: FitSample = { t };
+    const dist = num(r.distance);
+    const alt = num(r.enhancedAltitude) ?? num(r.altitude);
+    const speed = num(r.enhancedSpeed) ?? num(r.speed);
+    const hr = num(r.heartRate);
+    const temp = num(r.temperature);
+    if (dist !== null) s.distM = dist;
+    if (alt !== null) {
+      s.altM = alt;
+      hasAltitude = true;
+    }
+    if (speed !== null) s.speedMps = speed;
+    if (hr !== null && hr > 0) s.hr = hr;
+    if (temp !== null) s.tempC = temp;
+    samples.push(s);
+  }
+
+  const laps: FitLap[] = [];
+  for (const l of (messages.lapMesgs ?? []) as Rec[]) {
+    const ls = dateOf(l.startTime);
+    const dur = num(l.totalTimerTime) ?? num(l.totalElapsedTime);
+    if (!ls || dur === null) continue;
+    const lap: FitLap = { startS: Math.max(0, Math.round((ls.getTime() - t0) / 1000)), durationS: dur, distanceM: num(l.totalDistance) ?? 0 };
+    const hr = num(l.avgHeartRate);
+    if (hr !== null && hr > 0) lap.avgHr = hr;
+    laps.push(lap);
+  }
+  laps.sort((a, b) => a.startS - b.startS);
+
+  return {
+    laps,
+    samples,
+    maxHr: num(session?.maxHeartRate),
+    elevationGainM: num(session?.totalAscent),
+    subSport: str(session?.subSport),
+    manufacturer: str(fileId?.manufacturer),
+    hasAltitude,
   };
 }

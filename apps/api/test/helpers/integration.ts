@@ -38,6 +38,10 @@ export class FakeIntervals {
   upserts: SinkWorkout[][] = [];
   deletes: string[][] = [];
   activities: SourceActivity[] = [];
+  /** Original FIT bytes by activity id (GET /activity/{id}/file). */
+  files = new Map<string, Buffer>();
+  /** Detail payloads by activity id (GET /activity/{id}?intervals=true); falls back to the listing. */
+  details = new Map<string, SourceActivity>();
   hiddenStrava = 0;
   private nextId = 1000;
 
@@ -64,10 +68,11 @@ export class FakeIntervals {
           };
         },
         async getActivityDetail(id) {
-          return self.activities.find((a) => a.sourceId === id) ?? null;
+          return self.details.get(id) ?? self.activities.find((a) => a.sourceId === id) ?? null;
         },
-        async getOriginalFile() {
-          return null;
+        async getOriginalFile(id) {
+          const bytes = self.files.get(id);
+          return bytes ? { bytes, contentType: "application/vnd.ant.fit" } : null;
         },
       },
       sink: {

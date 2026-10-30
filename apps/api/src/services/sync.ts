@@ -3,6 +3,7 @@
  * - Poll: oldest = last_seen_date − 1 d (first run: today − 120 d), newest = today.
  * - Reconcile (nightly): the last 7 days.
  * - New activities: fetch detail, then the original FIT (/file) for runs. ~3 calls per new activity.
+ *   Laps (detail intervals, else FIT laps) and FIT samples go to activity_streams (§2.2, §4.9).
  * Ingest is idempotent on (user_id, source, source_id).
  */
 import { addDays } from "@paceo/engine";
@@ -12,6 +13,7 @@ import { FitParseError, maybeGunzip, parseFit } from "../integrations/fit/parse.
 import { sha256Hex } from "../crypto/tokens.js";
 import { localDate } from "../lib/time.js";
 import { AppError } from "../http/errors.js";
+import { fitStreamsOrNull, storeStreams } from "./streams.js";
 import { countBySport, getAccount, MESSAGES, PROVIDER, recordAdapterError, userTimezone } from "./connection.js";
 import type { Services } from "./context.js";
 
@@ -82,6 +84,7 @@ export async function syncUser(svc: Services, userId: string, mode: "poll" | "re
       const detail = await account.source.getActivityDetail(a.sourceId);
       if (detail) await activitiesRepo.upsert(svc.db, userId, activityInputFromSource(detail));
       const file = await account.source.getOriginalFile(a.sourceId);
+      await storeStreams(svc, userId, res.row.id, detail?.raw ?? a.raw, fitStreamsOrNull(svc, file?.bytes));
       if (file) {
         const rawId = await rawFilesRepo.put(svc.db, userId, {
           source: "intervals_icu",
@@ -140,6 +143,7 @@ export async function ingestFitUpload(svc: Services, userId: string, upload: Buf
     contentType: "application/vnd.ant.fit",
     bytes,
   });
+  const fitStreams = fitStreamsOrNull(svc, bytes);
   const res = await ingest(svc, userId, {
     source: "fit_upload",
     sourceId: sha.slice(0, 32),
@@ -160,5 +164,6 @@ export async function ingestFitUpload(svc: Services, userId: string, upload: Buf
     detail: { fit: { ...summary, startUtc: summary.startUtc.toISOString() } },
   });
   await activitiesRepo.setRawFile(svc.db, userId, res.row.id, rawId);
+  await storeStreams(svc, userId, res.row.id, null, fitStreams);
   return { ...res.row, rawFileId: rawId };
 }

@@ -338,6 +338,40 @@ export type DateRangeQuery = z.infer<typeof DateRangeQuery>;
 export const HealthResponse = z.object({ status: z.literal("ok"), db: z.boolean() });
 export type HealthResponse = z.infer<typeof HealthResponse>;
 
+// ---------- proposals (§8: replan suggestions that need the user's OK) ----------
+/**
+ * A replan proposal awaiting the user. `kind` is one of "vdot_change" (paces up/down), "goal_change"
+ * (revisit the race goal), "realign" (rebuild after missed sessions); kept a string so new engine
+ * kinds don't break older clients. `details` is the engine Proposal JSON (fromVdot/toVdot,
+ * alternatives, ...).
+ */
+export const Proposal = z.object({
+  id: z.string(),
+  kind: z.string(),
+  /** User-facing question, e.g. "Speed up your paces by about 1.2%?" */
+  message: z.string(),
+  status: z.enum(["pending", "accepted", "declined", "expired"]),
+  createdAt: Timestamp,
+  respondedAt: Timestamp.nullable(),
+  details: z.object({}).passthrough(),
+});
+export type Proposal = z.infer<typeof Proposal>;
+
+/** GET /api/proposals: pending proposals, oldest first. */
+export const ProposalListResponse = z.object({ items: z.array(Proposal) });
+export type ProposalListResponse = z.infer<typeof ProposalListResponse>;
+
+/** POST /api/proposals/:id body. */
+export const ProposalDecisionRequest = z.object({ accept: z.boolean() });
+export type ProposalDecisionRequest = z.infer<typeof ProposalDecisionRequest>;
+
+/** POST /api/proposals/:id response: what the immediate replan changed, plus follow-up advice. */
+export const ProposalDecisionResponse = z.object({
+  planChanges: z.array(z.string()),
+  advice: z.array(z.string()),
+});
+export type ProposalDecisionResponse = z.infer<typeof ProposalDecisionResponse>;
+
 /**
  * Route table (method, path, request schema, response schema). The API registers exactly these;
  * the web client calls exactly these. All routes except auth/register|login and health require a session cookie.
@@ -371,4 +405,6 @@ export const ROUTES = {
   vapidKey: { method: "GET", path: "/api/push/vapid-public-key" }, // → VapidKeyResponse
   pushSubscribe: { method: "POST", path: "/api/push/subscriptions" }, // PushSubscribeRequest → 204
   pushUnsubscribe: { method: "DELETE", path: "/api/push/subscriptions" }, // PushUnsubscribeRequest { endpoint } → 204
+  proposals: { method: "GET", path: "/api/proposals" }, // → ProposalListResponse (pending only)
+  respondProposal: { method: "POST", path: "/api/proposals/:id" }, // ProposalDecisionRequest → ProposalDecisionResponse (replans now)
 } as const;

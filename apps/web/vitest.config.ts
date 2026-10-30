@@ -9,5 +9,6 @@ export default defineConfig({
     setupFiles: ["./test/setup.ts"],
     include: ["test/**/*.test.{ts,tsx}"],
     css: false,
+    reporters: ["default", "./test/ci-annotations-reporter.ts"],
   },
 });

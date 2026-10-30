@@ -53,3 +53,74 @@ export function makeFitActivity(f: FitFixture): Buffer {
   });
   return Buffer.from(enc.close());
 }
+
+export interface FitRunFixture {
+  start: Date;
+  /** One record per second for this many seconds. */
+  seconds: number;
+  /** Constant speed, m/s. */
+  speedMps: number;
+  hr: number;
+  tempC?: number;
+  /** Lap boundaries in seconds from the start (each lap runs to the next, the last to the end). */
+  lapStarts?: number[];
+  subSport?: string;
+  manufacturer?: string;
+}
+
+/** A 1 Hz run with records (distance, altitude, speed, HR, temperature), device laps and a session. */
+export function makeFitRun(f: FitRunFixture): Buffer {
+  const enc = new sdk.Encoder();
+  const M = sdk.Profile.MesgNum;
+  const at = (s: number) => new Date(f.start.getTime() + s * 1000);
+  const end = at(f.seconds);
+  enc.onMesg(M.FILE_ID as number, {
+    type: "activity",
+    manufacturer: f.manufacturer ?? "garmin",
+    product: 4315,
+    serialNumber: 3_456_789_012,
+    timeCreated: f.start,
+  });
+  for (let s = 0; s <= f.seconds; s++) {
+    const rec: Record<string, unknown> = {
+      timestamp: at(s),
+      distance: s * f.speedMps,
+      altitude: 100 + Math.sin(s / 60) * 5,
+      speed: f.speedMps,
+      heartRate: f.hr + (s % 7),
+    };
+    if (f.tempC !== undefined) rec.temperature = f.tempC;
+    enc.onMesg(M.RECORD as number, rec);
+  }
+  const starts = f.lapStarts ?? [0];
+  starts.forEach((ls, i) => {
+    const le = starts[i + 1] ?? f.seconds;
+    enc.onMesg(M.LAP as number, {
+      timestamp: at(le),
+      startTime: at(ls),
+      totalElapsedTime: le - ls,
+      totalTimerTime: le - ls,
+      totalDistance: (le - ls) * f.speedMps,
+      avgHeartRate: f.hr + 3,
+    });
+  });
+  enc.onMesg(M.SESSION as number, {
+    timestamp: end,
+    startTime: f.start,
+    sport: "running",
+    subSport: f.subSport ?? "generic",
+    totalElapsedTime: f.seconds,
+    totalTimerTime: f.seconds,
+    totalDistance: f.seconds * f.speedMps,
+    avgHeartRate: f.hr + 3,
+    maxHeartRate: f.hr + 6,
+    totalAscent: 42,
+  });
+  enc.onMesg(M.ACTIVITY as number, {
+    timestamp: end,
+    numSessions: 1,
+    type: "manual",
+    localTimestamp: Math.round(end.getTime() / 1000) - FIT_EPOCH_S,
+  });
+  return Buffer.from(enc.close());
+}

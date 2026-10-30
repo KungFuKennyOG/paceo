@@ -3,7 +3,7 @@ import type { ActivitySummary, WorkoutItem } from "@paceo/contracts";
 import { weeklyLoad, type CrossTrainingSession, type Plan, type PlannedWorkout, type WeeklyLoad } from "@paceo/engine";
 import { useActivities, usePlan, useProfile, useToday, useUnits, useWorkouts } from "../api/hooks";
 import { WorkoutRow } from "../components/WorkoutCard";
-import { ActivityLine } from "../components/WorkoutBits";
+import { ActivityLine, GarminAttributionAny } from "../components/WorkoutBits";
 import { ErrorState, Skeleton } from "../components/States";
 import { addDays, formatDay, mondayOf, WEEKDAYS, WEEKDAY_SHORT } from "../lib/dates";
 import { formatKm, formatMinutes } from "../lib/units";
@@ -95,6 +95,7 @@ export function WeekScreen() {
         <div className="stat">
           <div className="stat__value">{formatKm(actualM / 1000, units)}</div>
           <div className="stat__label">Actual running</div>
+          <GarminAttributionAny activities={[...items.map((i) => i.matchedActivity), ...extraActs]} />
         </div>
       </div>
 

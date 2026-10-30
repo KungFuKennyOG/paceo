@@ -4,6 +4,7 @@ import { usePlan, useToday, useUnits } from "../api/hooks";
 import { FeasibilityPanel } from "../components/Feasibility";
 import { ConflictList, PaceTable, PHASE_NAMES, PhaseLegend, PhaseStrip, PlanSummaryStats, WeeklyBars } from "../components/PlanViews";
 import { Empty, ErrorState, Skeleton } from "../components/States";
+import { ProposalList } from "../components/Proposals";
 import { addDays, formatDay } from "../lib/dates";
 import { formatKm } from "../lib/units";
 
@@ -51,6 +52,8 @@ export function PlanScreen() {
         </div>
         {current && <span className={`pill phase-${current.phase}`}>{PHASE_NAMES[current.phase] ?? current.phase}</span>}
       </header>
+
+      <ProposalList />
 
       <section className="card">
         <PlanSummaryStats plan={plan} units={units} today={today} />

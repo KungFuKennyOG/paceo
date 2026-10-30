@@ -7,7 +7,8 @@
  *   (user_goal / user_schedule / user_strength / user_crosstraining collapse into it).
  * - checkins doubles as §2.2 session_log (sRPE, pain, illness, cross-training rows).
  * - raw_files stores FIT bytes in a bytea column, so a single pg_dump backs up everything.
- * - laps/samples are not stored yet; the original FIT is kept and can be re-parsed later.
+ * - laps/samples (§2.2) live in activity_streams: one row per activity, laps as jsonb and the 1 Hz
+ *   samples as one gzipped columnar blob (see src/plan/activity-streams.ts for the format).
  */
 import { sql } from "drizzle-orm";
 import {
@@ -19,6 +20,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -289,4 +291,56 @@ export const pushSubscriptions = pgTable(
     lastSuccessAt: timestamp("last_success_at", { withTimezone: true, mode: "date" }),
   },
   (t) => [index("push_subscriptions_user_idx").on(t.userId)],
+);
+
+/**
+ * Laps and samples per activity (§2.2 laps/samples, §4.9), written at sync / FIT upload and read by
+ * the replanner. One row per activity, not one per sample: ~10 users × years of runs stays small.
+ * - laps: engine ActivityLap[] (intervals.icu intervals when available, else the FIT's device laps).
+ * - samples: gzip(JSON) of a columnar, delta-encoded sample block at ≤ 1 Hz (format `format`).
+ * - summary: extra engine Activity fields from the detail/FIT (maxHr, elevationGainM, environment, ...).
+ */
+export const activityStreams = pgTable(
+  "activity_streams",
+  {
+    activityId: uuid("activity_id")
+      .primaryKey()
+      .references(() => activities.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    format: integer("format").notNull(),
+    laps: jsonb("laps").notNull(),
+    /** intervals_icu | fit | null (no laps) */
+    lapsSource: text("laps_source"),
+    samples: bytea("samples"),
+    sampleCount: integer("sample_count").notNull().default(0),
+    summary: jsonb("summary").notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("activity_streams_user_idx").on(t.userId)],
+);
+
+/**
+ * Engine replan proposals awaiting the user (§8: vdot_change, goal_change, realign). Keyed by the
+ * engine's stable proposal id per user, so a proposal re-emitted by later replans is one row.
+ * status: pending | accepted | declined | expired (no longer emitted by the engine).
+ */
+export const proposals = pgTable(
+  "proposals",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    id: text("id").notNull(),
+    kind: text("kind").notNull(),
+    /** Engine Proposal JSON. */
+    payload: jsonb("payload").notNull(),
+    message: text("message").notNull(),
+    status: text("status").notNull().default("pending"),
+    createdAt: createdAt(),
+    respondedAt: timestamp("responded_at", { withTimezone: true, mode: "date" }),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.id] }), index("proposals_user_status_idx").on(t.userId, t.status)],
 );

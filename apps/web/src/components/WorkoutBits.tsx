@@ -24,10 +24,21 @@ export function StatusBadge({ status }: { status: WorkoutItem["status"] }) {
   return <span className={`badge ${s.cls}`}>{s.label}</span>;
 }
 
-/** Required whenever an activity originated on a Garmin device (intervals.icu API terms, §3.2). */
+export const GARMIN_ATTRIBUTION = "Data from Garmin";
+
+/**
+ * Required wherever data from a Garmin-origin activity is shown (intervals.icu API terms, §3.2):
+ * single activities, and totals that include one.
+ */
 export function GarminAttribution({ activity }: { activity: Pick<ActivitySummary, "garminOrigin"> }) {
   if (!activity.garminOrigin) return null;
-  return <span className="attribution">Garmin · data recorded on a Garmin device</span>;
+  return <span className="attribution">{GARMIN_ATTRIBUTION}</span>;
+}
+
+/** Attribution under an aggregate (e.g. weekly totals) when any contributing activity is Garmin-origin. */
+export function GarminAttributionAny({ activities }: { activities: ReadonlyArray<Pick<ActivitySummary, "garminOrigin"> | null | undefined> }) {
+  if (!activities.some((a) => a?.garminOrigin)) return null;
+  return <span className="attribution">{GARMIN_ATTRIBUTION}</span>;
 }
 
 export function ActivityLine({ activity, units }: { activity: ActivitySummary; units: Units }) {

@@ -78,7 +78,7 @@ describe("workout steps: T workout", () => {
       garminOrigin: true,
     };
     renderWithProviders(<WorkoutCard item={item(T_WORKOUT, { status: "completed", matchedActivity: activity })} units="metric" />);
-    expect(screen.getByText(/Garmin · data recorded on a Garmin device/)).toBeInTheDocument();
+    expect(screen.getByText("Data from Garmin")).toBeInTheDocument();
     expect(screen.getByText("Done")).toBeInTheDocument();
   });
 });
