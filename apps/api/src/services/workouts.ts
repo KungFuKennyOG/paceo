@@ -30,7 +30,15 @@ export function toActivitySummary(a: ActivityRow): ActivitySummary {
 
 function matchable(r: PlannedWorkoutRow) {
   const w = r.workout as PlannedWorkout;
-  return { id: r.id, date: r.date, sport: r.sport, plannedMinutes: w.planned?.minutes ?? 0, plannedRunM: w.planned?.run_m ?? 0 };
+  return {
+    id: r.id,
+    date: r.date,
+    sport: r.sport,
+    plannedMinutes: w.planned?.minutes ?? 0,
+    plannedRunM: w.planned?.run_m ?? 0,
+    prescriptionMode: w.prescription_mode,
+    type: w.type,
+  };
 }
 
 function matchableActivity(a: ActivityRow) {
@@ -106,7 +114,7 @@ export async function skipWorkout(
   const advice: string[] = [];
   if (w.flags?.key_session || w.type === "L") {
     advice.push("Don't make it up by doubling another day. Carry on with the next session as planned.");
-    // TODO(engine-replan): R-MISS-2/3 may move a key session or long run within the week.
+    // The nightly replan applies R-MISS-2/3: it may move a key session or long run within the week.
   } else {
     advice.push("Missed easy runs are simply dropped; there's no need to make up the distance.");
   }

@@ -53,7 +53,7 @@ export interface RuleContext {
   declined: Set<string>;
   /** V1 time variant applies (long runs prescribed in minutes, §6.5). */
   timeMode: boolean;
-  /** V1 reference when no actual run is in the 30-day window (D: the entered/derived longest run). */
+  /** The entered (or rebuild-derived) longest run, dated the day before the plan's start (§6.5 seed). */
   v1Seed: V1Seed;
 }
 
@@ -92,6 +92,7 @@ function eventActivities(events: readonly CheckInEvent[]): Activity[] {
     const a: Activity = { id: `xt-${e.date}-${i}`, date: e.date, sport: e.sport, distanceM: 0, movingS: e.minutes * 60, isRace: false };
     if (e.srpe !== undefined) a.srpe = e.srpe;
     if (e.hard !== undefined) a.hard = e.hard;
+    if (e.activity !== undefined) a.activity = e.activity;
     out.push(a);
   });
   return out;
@@ -149,7 +150,8 @@ export function buildRuleContext(state: ReplanState, rawEvents: readonly CheckIn
     accepted,
     declined,
     timeMode: rx.longBy === "time",
-    v1Seed: { day: toDayNumber(today) - 10_000, km: state.input.longestRun30d.km, minutes: state.input.longestRun30d.minutes },
+    // As in generatePlan: the entered longest run counts as a run on the day before the plan's start.
+    v1Seed: { day: toDayNumber(state.input.today) - 1, km: state.input.longestRun30d.km, minutes: state.input.longestRun30d.minutes },
   };
   if (facts.goalTimeS !== undefined) ctx.goalTimeS = facts.goalTimeS;
   const brk = detectBreak(runs, activities, today);

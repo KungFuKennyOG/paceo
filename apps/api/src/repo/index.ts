@@ -130,6 +130,10 @@ export const screeningRepo = {
 };
 
 export const fitnessRepo = {
+  async get(db: DbOrTx, userId: string) {
+    const rows = await db.select().from(t.fitnessState).where(eq(t.fitnessState.userId, userId)).limit(1);
+    return rows[0];
+  },
   async upsert(db: DbOrTx, userId: string, v: { vdot: number | null; vdotSource: string; vdotDate: string | null }) {
     const now = new Date();
     await db
@@ -361,6 +365,10 @@ export const plansRepo = {
       .values({ userId, status: "active", ...v })
       .returning();
     return rows[0] as PlanRow;
+  },
+  /** A replan that only modifies days in place revises the active plan rather than superseding it. */
+  async updatePlan(db: DbOrTx, userId: string, id: string, v: { plan: unknown; paces: unknown }) {
+    await db.update(t.plans).set(v).where(and(eq(t.plans.userId, userId), eq(t.plans.id, id)));
   },
   /** System: users with an active plan. */
   async systemUsersWithActivePlan(db: DbOrTx): Promise<string[]> {

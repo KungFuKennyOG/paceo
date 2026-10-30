@@ -1,14 +1,21 @@
 /**
- * Planned workout ↔ completed activity matching and status (spec §3.9, §8 compliance bands).
- * Simple local-date + sport matching for now.
- * TODO(engine-matcher): replace with the engine's matcher (laps → steps, per-step compliance).
+ * Planned workout ↔ completed activity matching and status for the workout list (spec §3.9, §8).
+ * Same rules as the engine's matcher (matchActivities in @paceo/engine, which the replanner uses on
+ * the full history): local date + sport, completed at ≥ 80% of plan, measured by distance for
+ * pace-prescribed runs and by duration for time/RPE and run/walk sessions. Per-step compliance from
+ * laps is computed by the engine during replanning; rows here carry no laps.
  */
+import { COMPLETED_MIN_RATIO, complianceMeasure, type WorkoutType } from "@paceo/engine";
+
 export interface MatchableWorkout {
   id: string;
   date: string;
   sport: string;
   plannedMinutes: number;
   plannedRunM: number;
+  /** When known, picks the engine's compliance measure (§8). */
+  prescriptionMode?: "pace" | "time_rpe" | "run_walk" | undefined;
+  type?: string | undefined;
 }
 
 export interface MatchableActivity {
@@ -48,6 +55,11 @@ export type DerivedStatus = "planned" | "completed" | "partial" | "missed" | "sk
 
 /** Completion as a fraction of planned duration (or distance when duration is unknown). */
 export function compliance(w: MatchableWorkout, a: MatchableActivity): number | null {
+  if (w.prescriptionMode !== undefined && w.type !== undefined && w.sport === "run") {
+    const by = complianceMeasure({ prescription_mode: w.prescriptionMode, type: w.type as WorkoutType });
+    if (by === "distance" && w.plannedRunM > 0 && a.distanceM !== null) return a.distanceM / w.plannedRunM;
+    if (by === "duration" && w.plannedMinutes > 0 && a.movingS !== null) return a.movingS / (w.plannedMinutes * 60);
+  }
   if (w.plannedMinutes > 0 && a.movingS !== null) return a.movingS / (w.plannedMinutes * 60);
   if (w.plannedRunM > 0 && a.distanceM !== null) return a.distanceM / w.plannedRunM;
   return null;
@@ -63,7 +75,7 @@ export function deriveStatus(
   if (stored === "skipped") return "skipped";
   if (match) {
     const c = compliance(w, match);
-    return c === null || c >= 0.8 ? "completed" : "partial";
+    return c === null || c >= COMPLETED_MIN_RATIO ? "completed" : "partial";
   }
   return w.date < today ? "missed" : "planned";
 }

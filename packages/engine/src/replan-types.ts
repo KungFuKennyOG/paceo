@@ -97,6 +97,8 @@ export interface SrpeEvent extends EventBase {
 export interface CrossTrainingEvent extends EventBase {
   type: "cross_training";
   sport: Exclude<ActivitySport, "run">;
+  /** Raw name ("dragon boat", "Ride"): refines the §10.2 class. */
+  activity?: string;
   minutes: number;
   srpe?: number;
   hard?: boolean;

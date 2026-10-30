@@ -8,7 +8,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { createSecretBox } from "../../src/crypto/secretbox.js";
 import { IntervalsError } from "../../src/integrations/intervals/client.js";
 import type { IntervalsAccount, SinkEvent, SinkWorkout, SourceActivity } from "../../src/integrations/types.js";
-import { ruleTraceExplainer } from "../../src/plan/explain.js";
+import { engineExplainer } from "../../src/plan/explain.js";
 import { InlineQueue } from "../../src/jobs/queue.js";
 import { createHandlers } from "../../src/jobs/handlers.js";
 import { silentLogger, type Services } from "../../src/services/context.js";
@@ -132,7 +132,7 @@ export async function startHarness(url: string): Promise<Harness> {
     jobs: queue,
     clock: () => new Date(),
     push,
-    explainer: ruleTraceExplainer,
+    explainer: engineExplainer,
     config: {
       cookieSecure: false,
       sessionTtlDays: 30,
