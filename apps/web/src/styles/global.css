@@ -901,9 +901,11 @@ input[type="range"] {
   font-family: var(--font-display);
   font-weight: 700;
   font-style: italic;
-  font-size: 1.6rem;
+  font-size: clamp(1.15rem, 5.2vw, 1.6rem);
   line-height: 1;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .stat__label {
