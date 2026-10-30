@@ -7,5 +7,6 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 60_000,
+    reporters: ["default", "./test/ci-annotations-reporter.ts"],
   },
 });

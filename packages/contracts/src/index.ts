@@ -314,6 +314,23 @@ export const PushSubscribeRequest = z.object({
 });
 export type PushSubscribeRequest = z.infer<typeof PushSubscribeRequest>;
 
+// ---------- additions (apps/api, additive only) ----------
+/** POST /api/connections/intervals/test-workout → the setup-test event that was pushed (§2.5 step 8). */
+export const TestWorkoutResponse = z.object({ externalId: z.string(), date: LocalDate });
+export type TestWorkoutResponse = z.infer<typeof TestWorkoutResponse>;
+
+/** DELETE /api/push/subscriptions body. */
+export const PushUnsubscribeRequest = z.object({ endpoint: z.string().url() });
+export type PushUnsubscribeRequest = z.infer<typeof PushUnsubscribeRequest>;
+
+/** ?from=&to= on GET /api/workouts and GET /api/activities. Both optional; the API picks a default window. */
+export const DateRangeQuery = z.object({ from: LocalDate.optional(), to: LocalDate.optional() });
+export type DateRangeQuery = z.infer<typeof DateRangeQuery>;
+
+/** GET /api/health */
+export const HealthResponse = z.object({ status: z.literal("ok"), db: z.boolean() });
+export type HealthResponse = z.infer<typeof HealthResponse>;
+
 /**
  * Route table (method, path, request schema, response schema). The API registers exactly these;
  * the web client calls exactly these. All routes except auth/register|login and health require a session cookie.
