@@ -1,0 +1,12 @@
+# Used by BuildKit for deploy/Dockerfile (context = repo root).
+**/node_modules
+**/dist
+**/coverage
+**/.vite
+.git
+.github
+**/*.log
+**/.env
+**/.env.*
+!**/.env.example
+deploy/backups

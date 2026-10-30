@@ -84,7 +84,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       prefix: "/",
       setHeaders(res, filePath) {
         const base = path.basename(filePath);
-        if (base === "index.html" || base === "sw.js" || base.endsWith(".webmanifest")) {
+        // Service workers and the app shell must revalidate so updates reach installed PWAs.
+        if (base === "index.html" || base.endsWith("sw.js") || base === "registerSW.js" || base.endsWith(".webmanifest")) {
           res.header("Cache-Control", "no-cache");
         } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
           res.header("Cache-Control", "public, max-age=31536000, immutable");
