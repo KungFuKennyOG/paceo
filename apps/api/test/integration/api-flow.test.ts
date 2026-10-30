@@ -322,6 +322,12 @@ describe.skipIf(!TEST_DATABASE_URL)("API flow (Postgres)", () => {
     expect(me.onboardingComplete).toBe(true);
   });
 
+  it("does not re-plan on a units-only change", async () => {
+    const res = await req("PUT", "/api/profile", { ...profile(), units: "imperial" });
+    expect(res.statusCode).toBe(200);
+    expect(PlanResponse.parse((await req("GET", "/api/plan/current")).json()).planId).toBe(planId);
+  });
+
   it("re-plans on a profile change", async () => {
     const res = await req("PUT", "/api/profile", { ...profile(), daysAvailable: ["tue", "wed", "thu", "sat", "sun"] });
     expect(res.statusCode).toBe(200);

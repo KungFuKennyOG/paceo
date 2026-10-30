@@ -169,6 +169,7 @@ export function protectedRoutes(svc: Services): FastifyPluginAsync {
         throw new AppError(400, "validation", `Unknown timezone "${profile.timezone}".`);
       }
       const hadPlan = (await plansRepo.current(svc.db, user.id)) !== undefined;
+      const previous = await loadProfile(svc, user.id);
       await profileRepo.upsert(svc.db, user.id, {
         profile,
         units: profile.units,
@@ -178,7 +179,7 @@ export function protectedRoutes(svc: Services): FastifyPluginAsync {
         watchBrand: profile.watchBrand,
       });
       // §2.3 re-onboarding: profile edits re-check feasibility and replan from today.
-      if (hadPlan) {
+      if (hadPlan && planRelevantChange(previous, profile)) {
         await svc.jobs.enqueue(JOB.replanUser, { userId: user.id, reason: "profile_change" }, { singletonKey: `replan:${user.id}`, singletonSeconds: 60 });
       }
       return output(Profile, profile);
@@ -310,6 +311,21 @@ export function protectedRoutes(svc: Services): FastifyPluginAsync {
       return reply.status(204).send();
     });
   };
+}
+
+/** Display-only fields: changing them must not replan (units are formatting only, §5). */
+export function planRelevantChange(before: Profile | null, after: Profile): boolean {
+  if (!before) return true;
+  const strip = ({ units: _u, ...rest }: Profile) => rest;
+  return stableJson(strip(before)) !== stableJson(strip(after));
+}
+
+function stableJson(v: unknown): string {
+  return JSON.stringify(v, (_k, val: unknown) =>
+    val && typeof val === "object" && !Array.isArray(val)
+      ? Object.fromEntries(Object.entries(val as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
+      : val,
+  );
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
