@@ -10,11 +10,18 @@
  * - fever → fever + systemic; aboveNeckOnly = false → systemic (below-neck) symptoms.
  * - Skipped workouts become skip events by date (ids can change across rebuilds).
  * - fitness_state keeps no history: its vdot_date stands in as the last change (for the 2-week freeze).
+ * - Activities carry their stored streams (laps, ≤ 1 Hz samples, maxHr, elevation, environment,
+ *   altitude source; src/plan/activity-streams.ts) so per-step compliance, R-PERF, GAP and critical
+ *   speed have input. isRace also applies the narrow name heuristic to rows stored before it existed.
+ * - HRmax / HRrest come from the profile. A user-entered HRmax counts as "measured" (D: the profile
+ *   asks for a known max, not an estimate); without one the engine's age formula applies.
  */
 import {
   addDays,
   daysBetween,
   type Activity,
+  type ActivityLap,
+  type ActivitySample,
   type ActivitySport,
   type CheckInEvent,
   type CrossTrainingEvent,
@@ -22,6 +29,7 @@ import {
   type SkipReason,
   type VdotStatus,
 } from "@paceo/engine";
+import { looksLikeRace, type StreamsSummary } from "./activity-streams.js";
 
 export interface ActivityLike {
   id: string;
@@ -70,27 +78,60 @@ export function engineSport(sport: string): ActivitySport {
   return SPORTS[sport] ?? "other";
 }
 
-export function toEngineActivity(a: ActivityLike): Activity {
+/** Stored activity_streams content for one activity (decoded). */
+export interface StreamsLike {
+  laps: ActivityLap[];
+  samples: ActivitySample[];
+  summary: StreamsSummary;
+}
+
+export function toEngineActivity(a: ActivityLike, streams?: StreamsLike): Activity {
   const out: Activity = {
     id: a.id,
     date: a.localDate,
     sport: engineSport(a.sport),
     distanceM: a.distanceM ?? 0,
     movingS: a.movingS ?? a.elapsedS ?? 0,
-    isRace: a.isRace,
+    isRace: a.isRace || (engineSport(a.sport) === "run" && looksLikeRace(a.name)),
   };
   if (a.avgHr !== null) out.avgHr = a.avgHr;
   if (out.sport !== "run" && a.name) out.activity = a.name;
+  if (streams) {
+    if (streams.laps.length > 0) out.laps = streams.laps;
+    if (streams.samples.length > 1) out.samples = streams.samples;
+    const s = streams.summary;
+    if (s.maxHr !== undefined) out.maxHr = s.maxHr;
+    if (s.elevationGainM !== undefined) out.elevationGainM = s.elevationGainM;
+    if (s.environment !== undefined) out.environment = s.environment;
+    if (s.altitudeSource !== undefined) out.altitudeSource = s.altitudeSource;
+  }
   return out;
+}
+
+/** HR settings from the profile, for FitnessState (§4.6 HR-pace evidence, Uth–Sørensen check). */
+export interface HrProfileLike {
+  hrMax: number | null;
+  hrRest: number | null;
 }
 
 const VDOT_STATUSES: readonly VdotStatus[] = ["race", "tt", "estimated", "none"];
 
-export function toFitnessState(row: FitnessRowLike | undefined, fallback: { vdot?: number; vdotStatus: VdotStatus }): FitnessState {
+export function toFitnessState(
+  row: FitnessRowLike | undefined,
+  fallback: { vdot?: number; vdotStatus: VdotStatus },
+  hr?: HrProfileLike,
+): FitnessState {
   const status = row && (VDOT_STATUSES as readonly string[]).includes(row.vdotSource) ? (row.vdotSource as VdotStatus) : fallback.vdotStatus;
   const vdot = row?.vdot ?? fallback.vdot;
   const f: FitnessState = { status, history: [] };
   if (vdot !== undefined && vdot !== null) f.vdot = vdot;
+  const hrMax = hr?.hrMax ?? null;
+  const hrRest = hr?.hrRest ?? null;
+  if (hrMax !== null) {
+    f.hrMax = hrMax;
+    f.hrMaxSource = "measured";
+  }
+  if (hrRest !== null) f.hrRest = hrRest;
   if (row?.vdotDate && f.vdot !== undefined) {
     f.history.push({ date: row.vdotDate, toVdot: f.vdot, status, rule: "stored", source: `stored:${row.vdotDate}`, reason: "stored fitness" });
   }

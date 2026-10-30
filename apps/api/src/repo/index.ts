@@ -18,6 +18,8 @@ export type PlannedWorkoutRow = typeof t.plannedWorkouts.$inferSelect;
 export type PushSubscriptionRow = typeof t.pushSubscriptions.$inferSelect;
 export type ScreeningRow = typeof t.screening.$inferSelect;
 export type ProfileRow = typeof t.userProfile.$inferSelect;
+export type ProposalRow = typeof t.proposals.$inferSelect;
+export type ActivityStreamsRow = typeof t.activityStreams.$inferSelect;
 
 // ── users / invites / sessions ───────────────────────────────────────────────────────────────────
 
@@ -335,6 +337,74 @@ export const rawFilesRepo = {
       .where(and(eq(t.rawFiles.userId, userId), eq(t.rawFiles.sha256, v.sha256)))
       .limit(1);
     return (rows[0] as { id: string }).id;
+  },
+  async bytes(db: DbOrTx, userId: string, id: string): Promise<{ bytes: Buffer; contentType: string } | undefined> {
+    const rows = await db
+      .select({ bytes: t.rawFiles.bytes, contentType: t.rawFiles.contentType })
+      .from(t.rawFiles)
+      .where(and(eq(t.rawFiles.userId, userId), eq(t.rawFiles.id, id)))
+      .limit(1);
+    return rows[0];
+  },
+};
+
+export interface ActivityStreamsInput {
+  format: number;
+  laps: unknown;
+  lapsSource: string | null;
+  samples: Buffer | null;
+  sampleCount: number;
+  summary: unknown;
+}
+
+export const streamsRepo = {
+  async upsert(db: DbOrTx, userId: string, activityId: string, v: ActivityStreamsInput) {
+    const now = new Date();
+    await db
+      .insert(t.activityStreams)
+      .values({ activityId, userId, ...v, updatedAt: now })
+      .onConflictDoUpdate({ target: t.activityStreams.activityId, set: { ...v, updatedAt: now } });
+  },
+  async forActivities(db: DbOrTx, userId: string, activityIds: string[]): Promise<ActivityStreamsRow[]> {
+    if (activityIds.length === 0) return [];
+    return db
+      .select()
+      .from(t.activityStreams)
+      .where(and(eq(t.activityStreams.userId, userId), inArray(t.activityStreams.activityId, activityIds)));
+  },
+};
+
+// ── proposals ────────────────────────────────────────────────────────────────────────────────────
+
+export const proposalsRepo = {
+  async list(db: DbOrTx, userId: string, status?: string): Promise<ProposalRow[]> {
+    const where = status ? and(eq(t.proposals.userId, userId), eq(t.proposals.status, status)) : eq(t.proposals.userId, userId);
+    return db.select().from(t.proposals).where(where).orderBy(asc(t.proposals.createdAt), asc(t.proposals.id));
+  },
+  async get(db: DbOrTx, userId: string, id: string): Promise<ProposalRow | undefined> {
+    const rows = await db
+      .select()
+      .from(t.proposals)
+      .where(and(eq(t.proposals.userId, userId), eq(t.proposals.id, id)))
+      .limit(1);
+    return rows[0];
+  },
+  async insert(db: DbOrTx, userId: string, v: { id: string; kind: string; payload: unknown; message: string }) {
+    await db
+      .insert(t.proposals)
+      .values({ userId, ...v, status: "pending" })
+      .onConflictDoNothing({ target: [t.proposals.userId, t.proposals.id] });
+  },
+  async update(
+    db: DbOrTx,
+    userId: string,
+    id: string,
+    v: Partial<Pick<ProposalRow, "kind" | "payload" | "message" | "status" | "respondedAt">>,
+  ) {
+    await db
+      .update(t.proposals)
+      .set(v)
+      .where(and(eq(t.proposals.userId, userId), eq(t.proposals.id, id)));
   },
 };
 

@@ -2,7 +2,7 @@
 # End-to-end smoke test of the production Docker stack (used by CI, runnable locally).
 # Builds the image, starts api + postgres with throwaway secrets, then walks the main user flow
 # through the HTTP API: health → web app shell → invite → register → health screen → profile →
-# plan generate → workouts. Run from the repo root:  bash deploy/smoke-test.sh
+# plan generate → workouts → proposals. Run from the repo root:  bash deploy/smoke-test.sh
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -113,6 +113,11 @@ FROM=$(date -u +%F); TO=$(date -u -d '+30 days' +%F)
 N=$(post GET "/api/workouts?from=$FROM&to=$TO" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).items.length))')
 echo "workouts in next 30 days: $N"
 [ "$N" -gt 0 ] || { echo "no workouts generated" >&2; exit 1; }
+
+echo "▶ proposals"
+post GET /api/proposals | grep -q '"items":\[' || { echo "GET /api/proposals did not return a list" >&2; exit 1; }
+code=$(curl -s -o /dev/null -w "%{http_code}" -b "$JAR" -H 'content-type: application/json' -X POST "$BASE/api/proposals/none" -d '{"accept":true}')
+[ "$code" = 404 ] || { echo "POST /api/proposals/none returned $code, expected 404" >&2; exit 1; }
 
 echo "▶ memory"
 docker stats --no-stream --format '{{.Name}}: {{.MemUsage}}' | grep paceo || true

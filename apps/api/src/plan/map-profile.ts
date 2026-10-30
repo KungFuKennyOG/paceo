@@ -2,10 +2,12 @@
  * Contract Profile → engine PlanRequest. This is the ONLY place that knows both shapes, so engine
  * changes land here.
  *
- * Still pending on the engine side, marked TODO(engine-*) below:
- * - TODO(engine-schedule): daysAvailable (which weekdays) and maxMinutesByDay; the engine only takes a
- *   run-day count and the long-run day today.
- * - TODO(engine-hr): hrMax / hrRest for HR targets.
+ * Still pending on the engine side, marked TODO(engine-followups) below (the engine branch adds
+ * PlanInput.runWeekdays, maxMinutesByDay, hrMax, hrMaxSource and hrRest):
+ * - daysAvailable (which weekdays) and maxMinutesByDay; main's engine only takes a run-day count and
+ *   the long-run day.
+ * - hrMax / hrMaxSource / hrRest for HR targets. (Replans already pass the profile's HRmax/HRrest
+ *   through FitnessState, see replan-state.ts.)
  */
 import {
   computeVdot,
@@ -166,9 +168,13 @@ export function mapProfileToPlanInput(profile: Profile, ctx: MapContext): Mapped
     lockedEvents: lockedEvents(profile),
     strength: strengthConfig(profile),
     conservative,
-    // TODO(engine-schedule): daysAvailable: profile.daysAvailable, maxMinutesByDay: profile.maxMinutesByDay
-    // TODO(engine-hr): hrMax: profile.hrMax, hrRest: profile.hrRest
+    // TODO(engine-followups): runWeekdays: profile.daysAvailable,
+    // TODO(engine-followups): maxMinutesByDay: profile.maxMinutesByDay (only days with a cap; {} = none),
   };
+  // TODO(engine-followups): HR settings, once PlanInput has them (exactOptionalPropertyTypes: set only when known):
+  //   if (profile.hrMax !== null) { common.hrMax = profile.hrMax; common.hrMaxSource = "measured"; }
+  //   else if (profile.birthYear !== null) common.hrMaxSource = "age_formula";
+  //   if (profile.hrRest !== null) common.hrRest = profile.hrRest;
   if (v.value !== null) common.vdot = v.value;
   if (v.anchorM !== undefined && v.value !== null) common.vdotAnchorM = v.anchorM;
   if (profile.birthYear !== null) common.age = Number(ctx.today.slice(0, 4)) - profile.birthYear;

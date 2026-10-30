@@ -1,5 +1,5 @@
 /** Job handlers (spec §12.1). Each one is a thin wrapper over a service function. */
-import { credentialsRepo, profileRepo, sessionsRepo, workoutsRepo } from "../repo/index.js";
+import { activitiesRepo, credentialsRepo, profileRepo, sessionsRepo, workoutsRepo, type PlannedWorkoutRow } from "../repo/index.js";
 import type { PlannedWorkout } from "@paceo/engine";
 import { localDate } from "../lib/time.js";
 import { AppError } from "../http/errors.js";
@@ -12,12 +12,29 @@ import type { Services } from "../services/context.js";
 import { dailyDue, syncDue } from "./dispatch.js";
 import { JOB, type JobHandlers } from "./queue.js";
 
+/**
+ * The workout the morning push is about, or undefined when there's nothing to say: no workout
+ * today (rest day), everything skipped, or today's sessions already logged (an activity of the
+ * same sport today).
+ */
+export function morningWorkout(rows: readonly PlannedWorkoutRow[], sportsDoneToday: readonly string[]): PlannedWorkoutRow | undefined {
+  const open = rows.filter((r) => r.status === "planned" && !sportsDoneToday.includes(r.sport));
+  return open.find((r) => r.sport === "run") ?? open[0];
+}
+
+async function morningWorkoutFor(svc: Services, userId: string, today: string): Promise<PlannedWorkoutRow | undefined> {
+  const rows = await workoutsRepo.range(svc.db, userId, today, today);
+  if (rows.length === 0) return undefined;
+  const done = (await activitiesRepo.list(svc.db, userId, today, today)).map((a) => a.sport);
+  return morningWorkout(rows, done);
+}
+
+/** "Today's workout" push (§11.2). Quiet on rest days: no workout today → no push. */
 export async function notifyToday(svc: Services, userId: string): Promise<number> {
   const profile = await loadProfile(svc, userId);
   if (!profile) return 0;
   const today = localDate(svc.clock(), profile.timezone);
-  const rows = (await workoutsRepo.range(svc.db, userId, today, today)).filter((r) => r.status === "planned");
-  const first = rows.find((r) => r.sport === "run") ?? rows[0];
+  const first = await morningWorkoutFor(svc, userId, today);
   if (!first) return 0;
   const w = first.workout as PlannedWorkout;
   return pushToUser(svc, userId, todayMessage(w, profile.units, sinkStateOf(first).status === "pushed"));
@@ -52,7 +69,8 @@ export async function dispatchDaily(svc: Services, healthcheckPingUrl?: string):
       nightly++;
     }
     const am = dailyDue(now, timezone, svc.config.morningPushHour);
-    if (am.due) {
+    // No workout today → no morning job at all (notifyToday checks again when it runs).
+    if (am.due && (await morningWorkoutFor(svc, userId, am.localDate))) {
       await svc.jobs.enqueue(JOB.notifyToday, { userId }, { singletonKey: `today:${userId}:${am.localDate}`, singletonSeconds: 3600 });
       morning++;
     }

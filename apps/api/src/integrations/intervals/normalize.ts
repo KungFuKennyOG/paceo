@@ -1,6 +1,7 @@
 /** intervals.icu activity JSON → SourceActivity (spec §3.1 provenance fields). */
 import type { SourceActivity } from "../types.js";
 import type { IcuActivity } from "./schemas.js";
+import { looksLikeRace } from "../../plan/activity-streams.js";
 
 export function normalizeSport(type: string | null | undefined): string {
   const t = (type ?? "").toLowerCase();
@@ -52,7 +53,8 @@ export function normalizeActivity(a: IcuActivity): SourceActivity | null {
     movingS: a.moving_time ?? null,
     elapsedS: a.elapsed_time ?? null,
     avgHr: a.average_heartrate ?? a.icu_average_hr ?? null,
-    isRace: a.race === true || (a.sub_type ?? "").toUpperCase() === "RACE",
+    // intervals.icu's race flag / RACE sub-type, else a narrow name heuristic (D, activity-streams.ts).
+    isRace: a.race === true || (a.sub_type ?? "").toUpperCase() === "RACE" || looksLikeRace(a.name),
     name: a.name ?? null,
     device,
     // Garmin attribution is required for Garmin-derived data (§3.2 terms).
