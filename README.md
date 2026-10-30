@@ -10,7 +10,8 @@ The full design lives in [`docs/spec.md`](docs/spec.md).
 |---|---|
 | `packages/engine` — pace model (VDOT, race equivalence, training paces, goal checks, fade), units, workout DSL, intervals.icu text compiler | ✅ first slice |
 | `scripts/spike-push-workout.ts` — test that pace workouts reach your watch | ✅ ready to run |
-| Plan generator, scheduler, replanning, strength | ⏳ next |
+| `packages/engine` — plan generator (§6: feasibility, phases, volume/cutbacks, long run, taper, quality count, workout library, run/walk ladder) and weekly scheduler (§7), with V1 on every run | ✅ second slice |
+| Strength placement (§9), cross-training locked events (§10), general-fitness mode, replanning (§8), HR/heat adjustments | ⏳ next |
 | `apps/api` (Fastify + Postgres + pg-boss) | ⏳ |
 | `apps/web` (React PWA) | ⏳ |
 | Deployment (Docker Compose + Cloudflare Tunnel) | ⏳ |
