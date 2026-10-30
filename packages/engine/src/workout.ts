@@ -1,6 +1,7 @@
 /**
  * Neutral planned-workout DSL (spec §3.8).
- * Targets are stored in SI (s/km); HR as %HRmax. Converted per sink at push time.
+ * Targets are stored in SI (s/km); HR as %HRmax, plus resolved bpm when the HRmax is known.
+ * Converted per sink at push time.
  */
 import { z } from "zod";
 
@@ -23,6 +24,9 @@ export const TargetSchema = z.discriminatedUnion("type", [
     type: z.literal("hr_pct_max"),
     lo: z.number().min(40).max(100),
     hi: z.number().min(40).max(100),
+    /** The same range resolved to bpm for the user's HRmax (§3.8 "%HRmax plus resolved bpm"); absent without an HRmax. */
+    lo_bpm: z.number().int().positive().optional(),
+    hi_bpm: z.number().int().positive().optional(),
   }),
   z.object({ type: z.literal("rpe"), value: z.string() }),
   z.object({ type: z.literal("open") }),

@@ -3,6 +3,7 @@
  * inside the engine; the API validates user input before it gets here.
  */
 import type { Weekday } from "./dates.js";
+import type { HrMaxSource } from "./analysis.js";
 import type { PlannedWorkout } from "./workout.js";
 import type { StrengthConfig } from "./strength.js";
 import type { CrossTrainingSession } from "./cross-training.js";
@@ -117,6 +118,19 @@ export interface PlanInput {
    */
   vdotAnchorM?: number;
   age?: number;
+  /**
+   * Maximum heart rate in bpm (§2.3, §4.6). With it, easy and long-run steps get HR targets and
+   * pace steps an HR fallback, in %HRmax with resolved bpm (§3.7, §3.8; see hr.ts).
+   */
+  hrMax?: number;
+  /**
+   * Where hrMax comes from (§4.6 HRmax policy). Default "measured" when hrMax is given. "age_formula"
+   * without hrMax means "use Tanaka 208 − 0.7·age" (needs `age`). Beginners get the §6.9 79% HR cap
+   * only from a measured HRmax.
+   */
+  hrMaxSource?: HrMaxSource;
+  /** Resting heart rate in bpm (§2.3). Carried for FIT-UPDATE's Uth sanity check (§4.6); targets use %HRmax. */
+  hrRest?: number;
   /** Injury in the past 12 months or current (§2.3). */
   injuryFlag: boolean;
   /** Cross-training > 40% of total_load over the last 4 weeks (§6.7 C1). */

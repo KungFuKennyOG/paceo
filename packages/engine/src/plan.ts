@@ -11,7 +11,9 @@
  *
  * TODO(§8): replanning; the TT result should trigger a replan into pace mode.
  * TODO(§6.3): BASE weeks of > 24-week race plans still run as E + strides + easy LR (strength uses the general row).
- * TODO(§4.8): heat; HR targets beyond the DSL fallback.
+ * HR targets (§3.7, §3.8, §6.9): with an HRmax, easy / long steps target HR and pace steps carry it as
+ * the fallback (hr.ts, workouts.ts).
+ * TODO(§4.8): heat.
  */
 import type { PlannedWorkout } from "./workout.js";
 import type {
@@ -97,6 +99,7 @@ import {
   type CrossTrainingSession,
 } from "./cross-training.js";
 import { scheduleStrength } from "./strength-schedule.js";
+import { hrTargetsFor, resolveHrMax, type ResolvedHr } from "./hr.js";
 import {
   generalFitnessAsRaceInput,
   generalFitnessCalendar,
@@ -135,6 +138,8 @@ interface Env {
   weekdays?: RunWeekdays;
   /** §7.1 step 4: minutes a run may take on an absolute day (Infinity = no limit). */
   dayCap: (day: number) => number;
+  /** HRmax for HR targets (§3.7, §6.9; hr.ts), when known and allowed for the level. */
+  hr?: ResolvedHr;
 }
 
 interface State {
@@ -277,6 +282,7 @@ function effectiveInput(input: PlanInput, feasibility: Plan["feasibility"]): Pla
 function makeEnv(input: PlanInput, cal: PlanCalendar, shape: PlanShape, mode: PlanMode): Env {
   const runDays = effectiveRunDays(input.level, requestedRunDays(input));
   const weekdays = runWeekdaysOf(input);
+  const hr = hrTargetsFor(input.level, resolveHrMax(input));
   const rx = prescriptionFor(input.level, input.vdotStatus, shape.paces);
   const lastDay = cal.startDay + 7 * cal.weeks - 1;
   const xt = expandLockedEvents(input.lockedEvents ?? [], cal.startDay, lastDay, mode === "race" ? cal.raceDay : undefined);
@@ -298,6 +304,7 @@ function makeEnv(input: PlanInput, cal: PlanCalendar, shape: PlanShape, mode: Pl
     qualityBlocked: blocked,
     flexibleBlocked: flexible,
     ...(weekdays ? { weekdays } : {}),
+    ...(hr ? { hr } : {}),
     dayCap: (day) => maxMinutesOn(input, weekdayOf(fromDayNumber(day))),
   };
 }
@@ -471,7 +478,7 @@ function capToPreviousWeek(info: WeekInfo, st: State, prevWasLadder: boolean): W
 }
 
 function buildContext(env: Env, info: WeekInfo): W.BuildContext {
-  return {
+  const ctx: W.BuildContext = {
     paces: env.shape.paces,
     rx: env.rx,
     level: env.input.level,
@@ -479,6 +486,8 @@ function buildContext(env: Env, info: WeekInfo): W.BuildContext {
     phase: info.phase,
     weeklyKm: capWeeklyKm(env, info),
   };
+  if (env.hr) ctx.hr = env.hr;
+  return ctx;
 }
 
 /**

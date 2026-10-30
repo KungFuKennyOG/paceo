@@ -8,6 +8,7 @@
  *   - "- 1km ..."      distance step; metres are written "mtr" (e.g. "400mtr") because "m" means minutes
  *   - "5:50-6:07/km Pace"   absolute pace range
  *   - "65-79% HR"     percent of max HR
+ *   - "140-155bpm HR" absolute HR range, used when the step carries resolved bpm (UNVERIFIED too)
  *   - "4x" header line followed by its steps, blank lines between blocks
  * scripts/spike-push-workout.ts exists to verify this on a real watch.
  */
@@ -47,6 +48,8 @@ function targetText(t: Target): string {
       return `${formatMinSec(slow)}-${formatMinSec(fast)}/km Pace`;
     }
     case "hr_pct_max":
+      // Resolved bpm when the HRmax is known (§3.8), so the watch doesn't depend on intervals.icu's own HRmax.
+      if (t.lo_bpm !== undefined && t.hi_bpm !== undefined) return `${t.lo_bpm}-${t.hi_bpm}bpm HR`;
       return `${Math.round(t.lo)}-${Math.round(t.hi)}% HR`;
     case "rpe":
       return ""; // no device target; RPE lives in the step label

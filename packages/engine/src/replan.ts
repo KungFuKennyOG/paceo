@@ -33,6 +33,7 @@ import { flattenSteps } from "./matching.js";
 import { exposureFamilyOf, generatePlan } from "./plan.js";
 import { isGeneralFitness, type ExposureFamily, type Plan, type PlanContinuation, type PlanInput, type PlanRequest } from "./plan-types.js";
 import { minWeeks } from "./feasibility.js";
+import { resolveHrMax } from "./hr.js";
 import { cutbackPolicy } from "./volume.js";
 import { BREAK_REBUILD_DAYS, BREAK_RESUME_MAX_DAYS } from "./replan-history.js";
 import { generalFitnessWeeks } from "./general-fitness.js";
@@ -267,8 +268,12 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
   };
   if (csVdot !== undefined) fuInput.csVdot = csVdot;
   if (hrIgnore !== undefined) fuInput.hrIgnoreUntil = hrIgnore;
-  if (fitness.hrMax !== undefined && fitness.hrRest !== undefined && fitness.vdot !== undefined) {
-    fuInput.uth = uthSanityCheck(fitness.vdot, fitness.hrMax, fitness.hrRest, fitness.hrMaxSource ?? "age_formula");
+  // HRmax / HRrest from the fitness state, else from the plan input (PlanInput.hrMax / hrRest).
+  const inputHr = resolveHrMax(ctx.raceInput);
+  const hrMax = fitness.hrMax ?? inputHr?.maxBpm;
+  const hrRest = fitness.hrRest ?? ctx.raceInput.hrRest;
+  if (hrMax !== undefined && hrRest !== undefined && fitness.vdot !== undefined) {
+    fuInput.uth = uthSanityCheck(fitness.vdot, hrMax, hrRest, fitness.hrMax !== undefined ? (fitness.hrMaxSource ?? "age_formula") : (inputHr?.source ?? "age_formula"));
   }
   const fu = fitnessUpdate(fuInput);
   fitness = fu.fitness;

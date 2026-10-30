@@ -10,6 +10,7 @@ import { ZONE_HR_PCT_MAX, type PaceRange } from "./paces.js";
 import { midPace, type PaceSet, type Prescription } from "./prescription.js";
 import { ladderStage, LADDER_WALK_WARMUP_S } from "./ladder.js";
 import { formatDistance } from "./units.js";
+import { hrTarget, type ResolvedHr } from "./hr.js";
 
 export type WorkoutDraft = Omit<PlannedWorkout, "id" | "user_id" | "date">;
 
@@ -22,6 +23,8 @@ export interface BuildContext {
   phase: Phase;
   /** This week's target volume (km), used by the Daniels % caps. */
   weeklyKm: number;
+  /** HRmax for HR targets (hr.ts: already off for beginners without a measured HRmax). Absent = no HR targets. */
+  hr?: ResolvedHr;
 }
 
 // ── Daniels caps (§6.10, C) and the low-volume floor (D) ─────────────────────────────────────────
@@ -88,10 +91,13 @@ const ZONE_HR: Partial<Record<Zone, { lo: number; hi: number }>> = {
   I: ZONE_HR_PCT_MAX.I,
 };
 
-function hrFallback(zone: Zone): Target | undefined {
+function hrFallback(zone: Zone, hr?: ResolvedHr): Target | undefined {
   const band = ZONE_HR[zone];
-  return band ? { type: "hr_pct_max", lo: band.lo, hi: band.hi } : undefined;
+  return band ? hrTarget(band, hr) : undefined;
 }
+
+/** Easy, long and recovery steps carry HR as their target when the HRmax is known (§3.7, D). */
+const HR_FIRST: ReadonlySet<Zone> = new Set(["E", "LR", "REC"]);
 
 // ── step accumulation ────────────────────────────────────────────────────────────────────────────
 
@@ -128,8 +134,16 @@ function run(ctx: BuildContext, kind: SegKind, len: Len, zone: Zone, note?: stri
     target,
     rpe,
   };
-  const fb = usePace ? hrFallback(zone) : undefined;
-  if (fb) step.fallback = fb;
+  // §3.7 single target per step: pace for T/I/M/R (HR as the fallback); HR for easy / long steps
+  // when the HRmax is known, with the pace (pace mode) as the fallback. RPE stays on the step.
+  const hrFirst = ctx.hr !== undefined && HR_FIRST.has(zone);
+  if (hrFirst) {
+    step.target = hrTarget(ZONE_HR[zone]!, ctx.hr);
+    if (usePace) step.fallback = target;
+  } else {
+    const fb = usePace ? hrFallback(zone, ctx.hr) : undefined;
+    if (fb) step.fallback = fb;
+  }
   if (note) step.note = note;
   return { step, runM: m, s };
 }

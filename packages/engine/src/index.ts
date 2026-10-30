@@ -42,3 +42,4 @@ export * from "./rules/hrv.js";
 export * from "./rules/race.js";
 export * from "./replan.js";
 export * from "./explain.js";
+export * from "./hr.js";

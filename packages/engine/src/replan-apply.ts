@@ -21,6 +21,7 @@ import { dayName, workoutLabel } from "./rules/miss.js";
 import { EASY_MIN_MINUTES } from "./scheduler.js";
 import { formatDistance, type Units } from "./units.js";
 import { v1Limit, v1Measure, v1Ok, v1Reference, type RunRecord, type V1Limit } from "./v1.js";
+import { hrTargetsFor, resolveHrMax, type ResolvedHr } from "./hr.js";
 import type { PlannedWorkout, SimpleStep, Step } from "./workout.js";
 import * as W from "./workouts.js";
 
@@ -53,16 +54,21 @@ export class Builder {
     this.rx = prescriptionFor(input.level, fitness.status, this.paces);
     this.level = input.level;
     this.distance = input.goal.distance;
+    // HR targets exactly as the plan made them (hr.ts), so rebuilt and edited sessions match.
+    this.hr = hrTargetsFor(input.level, resolveHrMax(input));
   }
   readonly level: PlanInput["level"];
   readonly distance: PlanInput["goal"]["distance"];
+  readonly hr: ResolvedHr | undefined;
 
   pacesOn(date: string): PaceSet {
     return this.scale && date >= this.scale.from ? scalePaceSet(this.paces, this.scale.factor) : this.paces;
   }
 
   ctx(date: string, phase: string | undefined, weeklyKm: number): W.BuildContext {
-    return { paces: this.pacesOn(date), rx: this.rx, level: this.level, distance: this.distance, phase: (phase ?? "FI") as Phase, weeklyKm };
+    const c: W.BuildContext = { paces: this.pacesOn(date), rx: this.rx, level: this.level, distance: this.distance, phase: (phase ?? "FI") as Phase, weeklyKm };
+    if (this.hr) c.hr = this.hr;
+    return c;
   }
 
   /** Stamp a draft onto a day, adding the pace marker when the break multiplier applies. */
@@ -418,13 +424,17 @@ export function mapPaces(w: PlannedWorkout, fn: (lo: number, hi: number) => [num
   let dS = 0;
   let dM = 0;
   const one = (st: SimpleStep, mult: number): SimpleStep => {
-    if (st.target.type !== "pace") return st;
-    const oldMid = (st.target.lo_s_per_km + st.target.hi_s_per_km) / 2;
-    const [lo, hi] = fn(st.target.lo_s_per_km, st.target.hi_s_per_km);
+    // The pace range is the target, or the fallback of an HR-targeted easy / long step (§3.7).
+    const inTarget = st.target.type === "pace";
+    const pace = st.target.type === "pace" ? st.target : st.fallback?.type === "pace" ? st.fallback : undefined;
+    if (!pace) return st;
+    const oldMid = (pace.lo_s_per_km + pace.hi_s_per_km) / 2;
+    const [lo, hi] = fn(pace.lo_s_per_km, pace.hi_s_per_km);
     const newMid = (lo + hi) / 2;
     if (st.duration.type === "distance") dS += mult * (st.duration.m / 1000) * (newMid - oldMid);
     else if (st.duration.type === "time") dM += mult * st.duration.s * (1000 / newMid - 1000 / oldMid);
-    return { ...st, target: { type: "pace", lo_s_per_km: round1(lo), hi_s_per_km: round1(hi) } };
+    const mapped = { type: "pace" as const, lo_s_per_km: round1(lo), hi_s_per_km: round1(hi) };
+    return inTarget ? { ...st, target: mapped } : { ...st, fallback: mapped };
   };
   const steps: Step[] = w.steps.map((st) => (st.kind === "repeat" ? { ...st, steps: st.steps.map((x) => one(x, st.count)) } : one(st, 1)));
   return {

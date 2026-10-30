@@ -104,9 +104,11 @@ export function stepCompliance(w: Pick<PlannedWorkout, "steps">, laps: readonly 
     if (st.duration.type === "time") out.durationRatio = lap.durationS / st.duration.s;
     else if (st.duration.type === "distance") out.durationRatio = lap.distanceM / st.duration.m;
     if (lap.distanceM > 0) out.actualPaceSPerKm = lap.durationS / (lap.distanceM / 1000);
-    if (st.target.type === "pace" && out.actualPaceSPerKm !== undefined) {
-      const lo = st.target.lo_s_per_km;
-      const hi = st.target.hi_s_per_km;
+    // An HR-targeted easy step keeps its pace range as the fallback (§3.7): compare against that.
+    const pace = st.target.type === "pace" ? st.target : st.fallback?.type === "pace" ? st.fallback : undefined;
+    if (pace && out.actualPaceSPerKm !== undefined) {
+      const lo = pace.lo_s_per_km;
+      const hi = pace.hi_s_per_km;
       const mid = (lo + hi) / 2;
       out.targetLoSPerKm = lo;
       out.targetHiSPerKm = hi;
