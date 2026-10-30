@@ -2,6 +2,7 @@ import { Link } from "react-router";
 import { useMe, usePlan, useToday, useUnits, useWorkouts } from "../api/hooks";
 import { WorkoutCard, WorkoutRow } from "../components/WorkoutCard";
 import { Empty, ErrorState, Skeleton } from "../components/States";
+import { ProposalList } from "../components/Proposals";
 import { addDays, formatDay, formatDayLong } from "../lib/dates";
 import type { Plan } from "@paceo/engine";
 import { daysBetween } from "../lib/dates";
@@ -44,6 +45,7 @@ export function TodayScreen() {
         )}
       </header>
       {conservative && <div className="banner banner--warn small">Conservative mode from your health check: beginner caps, no plyometrics, no heavy strength.</div>}
+      <ProposalList />
       {list.isPending && <Skeleton height={280} />}
       {list.isError && <ErrorState error={list.error} onRetry={() => void list.refetch()} />}
       {list.isSuccess && todays.length === 0 && (

@@ -10,6 +10,8 @@ import type {
   MeResponse,
   PlanResponse,
   Profile,
+  Proposal,
+  ProposalDecisionResponse,
   User,
   WorkoutDetailResponse,
   WorkoutItem,
@@ -333,3 +335,31 @@ export const sampleCheckIns: Record<string, CheckInResponse> = {
   },
   green: { id: "ci_2", planChanges: [], advice: ["Pain at this level is fine if it settles by tomorrow morning."] },
 };
+
+/** Pending replan proposals for the demo user (§8): a pace bump from recent quality sessions. */
+export function demoProposals(today: string, now: Date): Proposal[] {
+  return [
+    {
+      id: `vdot:+1:${addDays(today, -1)}`,
+      kind: "vdot_change",
+      message:
+        "Your last 3 quality sessions over 16 days were consistently faster than target at the expected effort. Speed up your paces by about 1.2% (VDOT 44.1 → 44.7)?",
+      status: "pending",
+      createdAt: new Date(now.getTime() - 6 * 3_600_000).toISOString(),
+      respondedAt: null,
+      details: { id: `vdot:+1:${addDays(today, -1)}`, kind: "vdot_change", rule: "R-PERF", fromVdot: 44.1, toVdot: 44.7, steps: 1, pacePct: 1.2, evidence: [] },
+    },
+  ];
+}
+
+/** Mock answer to a proposal: what the API returns after the immediate replan. */
+export function proposalDecision(p: Proposal, accept: boolean): ProposalDecisionResponse {
+  if (!accept) return { planChanges: [], advice: ["Okay, your plan stays as it is."] };
+  const d = p.details as { fromVdot?: number; toVdot?: number };
+  if (p.kind === "vdot_change" && typeof d.fromVdot === "number" && typeof d.toVdot === "number") {
+    return { planChanges: [`Paces updated: VDOT ${d.fromVdot.toFixed(1)} → ${d.toVdot.toFixed(1)}, from today.`], advice: [] };
+  }
+  if (p.kind === "realign") return { planChanges: ["Rebuilt your plan from today to race day, starting from the 24.0 km/week you've actually averaged over the last 3 weeks."], advice: [] };
+  if (p.kind === "goal_change") return { planChanges: [], advice: ["To change your goal, edit it in Settings; the plan rebuilds from it."] };
+  return { planChanges: [], advice: ["Accepted. There was nothing to change in your plan right now."] };
+}

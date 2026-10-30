@@ -14,6 +14,7 @@ import {
   LoginRequest,
   PlanPreviewRequest,
   Profile,
+  ProposalDecisionRequest,
   PushSubscribeRequest,
   RegisterRequest,
   SkipWorkoutRequest,
@@ -22,6 +23,7 @@ import {
   type ConnectionStatus,
   type HealthScreenResponse,
   type PlanResponse,
+  type Proposal,
   type User,
   type WorkoutItem,
 } from "@paceo/contracts";
@@ -32,6 +34,7 @@ import {
   buildDemoData,
   buildPlanResponse,
   demoConnection,
+  demoProposals,
   demoScreening,
   demoUser,
   DEMO_EMAIL,
@@ -39,6 +42,7 @@ import {
   detailFor,
   disconnectedConnection,
   meFor,
+  proposalDecision,
   workoutsForPlan,
 } from "./fixtures";
 
@@ -50,6 +54,7 @@ interface Account {
   plan: PlanResponse | null;
   workouts: WorkoutItem[];
   activities: ActivitySummary[];
+  proposals: Proposal[];
 }
 
 const SESSION_KEY = "paceo.mock.session";
@@ -74,6 +79,7 @@ function seed(): void {
     plan: data.plan,
     workouts: data.workouts,
     activities: data.activities,
+    proposals: demoProposals(today(), now),
   });
 }
 
@@ -153,6 +159,7 @@ route(
       plan: null,
       workouts: [],
       activities: [],
+      proposals: [],
     });
     setSession(user.email);
     return json(201, user);
@@ -419,6 +426,20 @@ route("POST", "/api/checkins", (req) => {
       break;
   }
   return json(201, res);
+});
+
+// ── proposals ────────────────────────────────────────────────────────────────────────────────────
+route("GET", "/api/proposals", () => json(200, { items: acct().proposals.filter((p) => p.status === "pending") }));
+
+route("POST", "/api/proposals/:id", (req, p) => {
+  const b = ProposalDecisionRequest.safeParse(req.body);
+  if (!b.success) return fail(400, "validation", "Request did not match the expected shape.", b.error.issues);
+  const prop = acct().proposals.find((x) => x.id === p.id);
+  if (!prop) return fail(404, "not_found", "Proposal not found.");
+  if (prop.status !== "pending") return fail(409, "proposal_closed", "You've already answered that suggestion.");
+  prop.status = b.data.accept ? "accepted" : "declined";
+  prop.respondedAt = new Date().toISOString();
+  return json(200, proposalDecision(prop, b.data.accept));
 });
 
 // ── activities & sync ────────────────────────────────────────────────────────────────────────────
