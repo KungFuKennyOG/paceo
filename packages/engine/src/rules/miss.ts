@@ -17,6 +17,7 @@ import {
   illnessDates,
   isKeyDay,
   isQualityWorkout,
+  qualityAllowedOn,
   v1LimitAt,
   weekContaining,
   type RuleContext,
@@ -82,6 +83,7 @@ function keySlot(ctx: RuleContext, moved: PlannedWorkout, from: string, to: stri
     const host = ctx.runOn.get(date);
     if (!host || host.flags.key_session || isQualityWorkout(host) || host.type === "L" || host.type === "RACE") continue;
     if (isKeyDay(ctx, addDays(date, -1)) || isKeyDay(ctx, addDays(date, 1))) continue;
+    if (isQualityWorkout(moved) && !qualityAllowedOn(ctx.plan, date)) continue;
     const week = weekContaining(ctx.plan, date);
     if (week) {
       const keys = dateRange(week.startDate, addDays(week.startDate, 6)).filter((d) => isKeyDay(ctx, d)).length;

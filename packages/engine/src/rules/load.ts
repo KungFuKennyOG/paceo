@@ -8,7 +8,9 @@
  *   R-LOAD-4 cross-training > 40% of total_load (4 weeks), or R-LOAD-2 two weeks running → 2:1 cutbacks
  *            at the next rebuild (D).
  */
-import { addDays, weekdayOf, type Weekday } from "../dates.js";
+import { addDays } from "../dates.js";
+import { weeklyLoad } from "../load.js";
+import type { PlanWeek } from "../plan-types.js";
 import { crossTrainingShare, dailyLoads, loadBetween } from "../replan-history.js";
 import { weekContaining, type RuleContext } from "../replan-context.js";
 import { emptyResult, type ReplanMetrics, type RuleResult } from "../replan-types.js";
@@ -16,30 +18,20 @@ import { emptyResult, type ReplanMetrics, type RuleResult } from "../replan-type
 export const LOAD_SPIKE_FACTOR = 1.3;
 export const XT_SHARE_2TO1 = 0.4;
 
-interface LockedLike {
-  weekday: Weekday;
-  minutes: number;
-  srpe: number;
-}
-
-function lockedEvents(ctx: RuleContext): readonly LockedLike[] {
-  return (ctx.input as Partial<Record<"lockedEvents", readonly LockedLike[]>>).lockedEvents ?? [];
-}
-
-/** Planned total_load of the 7-day week starting `start`: actual load on past days, plan + locked events after. */
-export function plannedWeekLoad(ctx: RuleContext, start: string): number {
-  let load = 0;
-  for (let i = 0; i < 7; i++) {
-    const d = addDays(start, i);
-    if (d < ctx.editableFrom) {
-      load += loadBetween(ctx.activities, d, addDays(d, 1));
-      continue;
-    }
-    const w = ctx.runOn.get(d);
-    if (w) load += w.planned.expected_srpe * w.planned.minutes;
-    for (const e of lockedEvents(ctx)) if (e.weekday === weekdayOf(d)) load += e.srpe * e.minutes;
-  }
-  return load;
+/**
+ * Planned total_load of the 7-day week starting `start`: actual load on days already lived, and
+ * load.ts weeklyLoad (runs, strength and locked cross-training) on the editable days.
+ */
+export function plannedWeekLoad(ctx: RuleContext, start: string, weeks: readonly PlanWeek[] = ctx.plan.weeks): number {
+  const past = loadBetween(ctx.activities, start, ctx.editableFrom < addDays(start, 7) ? ctx.editableFrom : addDays(start, 7));
+  const wk = weeks.find((w) => w.startDate === start);
+  if (!wk) return past;
+  const editable = (d: string) => d >= ctx.editableFrom;
+  const future = weeklyLoad({
+    workouts: wk.workouts.filter((w) => editable(w.date)),
+    crossTraining: (wk.crossTraining ?? []).filter((x) => editable(x.date)),
+  });
+  return past + future.totalLoad;
 }
 
 function prior4WeekMean(ctx: RuleContext, start: string): number | undefined {

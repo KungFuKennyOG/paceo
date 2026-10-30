@@ -3,6 +3,9 @@
  * Activities arrive already deduplicated (§3.9 unique key, cross-source match) and in SI units.
  * Dates are the athlete's LOCAL calendar date (YYYY-MM-DD); the engine never reads the clock.
  */
+import { CROSS_TRAINING_TABLE, crossTrainingClass, HARD_HIKE_GAIN_M, HARD_HIKE_MIN, HARD_SRPE, HARD_SRPE_CLIMBING, type CrossTrainingClass, type CrossTrainingRow } from "./cross-training.js";
+import { sessionLoad } from "./load.js";
+
 
 /** Sport classes from the §10.2 cross-training table, plus running. */
 export type ActivitySport =
@@ -73,65 +76,80 @@ export interface Activity {
   runWalk?: boolean;
   /** Cross-training only: intervals, race pieces, or the user marked it hard (§10.2). */
   hard?: boolean;
+  /** Raw activity name or intervals.icu sport type ("dragon boat", "VirtualRide"): refines the §10.2 class. */
+  activity?: string;
 }
 
-export interface CrossTrainingClass {
-  /** Counts toward the "aerobic cross-training" R-BREAK column (§8). "if45" = only sessions ≥ 45 min. */
-  aerobic: boolean | "if45";
-  /** Default sRPE when the user didn't log one (§10.2, D). */
-  srpe: { easy: number; hard: number };
-  /** Always a hard day (§10.2: team sports, HIIT). */
-  alwaysHard: boolean;
-  /** sRPE at or above which the session is a hard day. */
-  hardAtSrpe: number;
-  /** Excluded from monotony (§10.2 yoga row). */
-  excludeFromMonotony: boolean;
-}
-
-/** §10.2 cross-training table (all D). Running is listed for completeness (easy default sRPE 3). */
-export const SPORT_CLASS: Record<ActivitySport, CrossTrainingClass> = {
-  run: { aerobic: true, srpe: { easy: 3, hard: 7 }, alwaysHard: false, hardAtSrpe: 7, excludeFromMonotony: false },
-  ride: { aerobic: true, srpe: { easy: 3, hard: 7 }, alwaysHard: false, hardAtSrpe: 7, excludeFromMonotony: false },
-  swim: { aerobic: true, srpe: { easy: 3, hard: 7 }, alwaysHard: false, hardAtSrpe: 7, excludeFromMonotony: false },
-  row: { aerobic: true, srpe: { easy: 4, hard: 7 }, alwaysHard: false, hardAtSrpe: 7, excludeFromMonotony: false },
-  elliptical: { aerobic: true, srpe: { easy: 3, hard: 6 }, alwaysHard: false, hardAtSrpe: 7, excludeFromMonotony: false },
-  hike: { aerobic: "if45", srpe: { easy: 2, hard: 5 }, alwaysHard: false, hardAtSrpe: 7, excludeFromMonotony: false },
-  xc_ski: { aerobic: true, srpe: { easy: 4, hard: 7 }, alwaysHard: false, hardAtSrpe: 7, excludeFromMonotony: false },
-  team_sport: { aerobic: false, srpe: { easy: 5, hard: 8 }, alwaysHard: true, hardAtSrpe: 0, excludeFromMonotony: false },
-  hiit: { aerobic: false, srpe: { easy: 6, hard: 8 }, alwaysHard: true, hardAtSrpe: 0, excludeFromMonotony: false },
-  climb: { aerobic: false, srpe: { easy: 4, hard: 7 }, alwaysHard: false, hardAtSrpe: 8, excludeFromMonotony: false },
-  strength: { aerobic: false, srpe: { easy: 5, hard: 8 }, alwaysHard: false, hardAtSrpe: 8, excludeFromMonotony: false },
-  yoga: { aerobic: false, srpe: { easy: 2, hard: 4 }, alwaysHard: false, hardAtSrpe: 11, excludeFromMonotony: true },
-  // "Other / unknown": the user classifies it once (§10.2). Until then: not aerobic, moderate default.
-  other: { aerobic: false, srpe: { easy: 4, hard: 7 }, alwaysHard: false, hardAtSrpe: 7, excludeFromMonotony: false },
+/** ActivitySport → the §10.2 row in cross-training.ts (single source of the table). */
+export const SPORT_TO_CLASS: Record<Exclude<ActivitySport, "run">, CrossTrainingClass> = {
+  ride: "cycling",
+  swim: "swimming",
+  row: "rowing",
+  elliptical: "elliptical",
+  hike: "hiking",
+  xc_ski: "xc_ski",
+  team_sport: "team_sport",
+  hiit: "hiit",
+  climb: "climbing",
+  strength: "strength_unknown",
+  yoga: "yoga",
+  other: "other",
 };
 
-export const AEROBIC_HIKE_MIN_S = 45 * 60;
+/** §10.2 class of a non-run activity: its raw name when given (e.g. "dragon boat"), else its sport. */
+export function activityClass(a: Pick<Activity, "sport" | "activity">): CrossTrainingRow | undefined {
+  if (a.sport === "run") return undefined;
+  const cls = a.activity !== undefined ? crossTrainingClass(a.activity) : SPORT_TO_CLASS[a.sport];
+  return CROSS_TRAINING_TABLE[cls === "other" && a.activity !== undefined ? SPORT_TO_CLASS[a.sport] : cls];
+}
 
 /** True when the session counts toward the R-BREAK "aerobic cross-training" column (§8, §10.2). */
-export function isAerobicCrossTraining(a: Pick<Activity, "sport" | "movingS">): boolean {
-  if (a.sport === "run") return false;
-  const c = SPORT_CLASS[a.sport].aerobic;
-  return c === "if45" ? a.movingS >= AEROBIC_HIKE_MIN_S : c;
+export function isAerobicCrossTraining(a: Pick<Activity, "sport" | "movingS" | "activity">): boolean {
+  const row = activityClass(a);
+  if (!row) return false;
+  return row.aerobic === "if45" ? a.movingS >= AEROBIC_HIKE_MIN_S : row.aerobic === "yes";
 }
 
-/** sRPE used for load: the logged value, else the type's default (§10.1 "default to expected_srpe"). */
-export function effectiveSrpe(a: Pick<Activity, "sport" | "srpe" | "hard">, expectedSrpe?: number): number {
+export const AEROBIC_HIKE_MIN_S = 45 * 60;
+/** Easy run default sRPE when nothing was logged or planned (§10.1, D). */
+export const RUN_DEFAULT_SRPE = 3;
+
+/** sRPE used for load: the logged value, else the planned expected sRPE, else the §10.2 default. */
+export function effectiveSrpe(a: Pick<Activity, "sport" | "srpe" | "hard" | "activity">, expectedSrpe?: number): number {
   if (a.srpe !== undefined) return a.srpe;
   if (expectedSrpe !== undefined) return expectedSrpe;
-  const c = SPORT_CLASS[a.sport];
-  return a.hard || c.alwaysHard ? c.srpe.hard : c.srpe.easy;
+  const row = activityClass(a);
+  if (!row) return RUN_DEFAULT_SRPE;
+  return a.hard || row.hardRule === "always" ? row.srpe[1] : row.srpe[0];
 }
 
-/** total_load contribution, AU = sRPE × minutes (§10.1). */
-export function sessionLoad(a: Pick<Activity, "sport" | "srpe" | "hard" | "movingS">, expectedSrpe?: number): number {
-  return effectiveSrpe(a, expectedSrpe) * (a.movingS / 60);
+/** total_load contribution, AU = sRPE × minutes (§10.1, load.ts). */
+export function activityLoad(a: Pick<Activity, "sport" | "srpe" | "hard" | "movingS" | "activity">, expectedSrpe?: number): number {
+  return sessionLoad(effectiveSrpe(a, expectedSrpe), a.movingS / 60);
 }
 
-/** Hard day for §7.1 adjacency (§10.2). */
-export function isHardDay(a: Pick<Activity, "sport" | "srpe" | "hard">): boolean {
-  const c = SPORT_CLASS[a.sport];
-  return c.alwaysHard || a.hard === true || (a.srpe ?? 0) >= c.hardAtSrpe;
+/** Hard day for §7.1 adjacency (§10.2). External lifting is never hard for running purposes. */
+export function isHardDay(a: Pick<Activity, "sport" | "srpe" | "hard" | "activity" | "movingS" | "elevationGainM">): boolean {
+  const row = activityClass(a);
+  if (!row) return false;
+  const srpe = a.srpe ?? 0;
+  switch (row.hardRule) {
+    case "always":
+      return true;
+    case "never":
+      return false;
+    case "srpe8":
+      return a.hard === true || srpe >= HARD_SRPE_CLIMBING;
+    case "hike":
+      return a.hard === true || srpe >= HARD_SRPE || (a.movingS / 60 > HARD_HIKE_MIN && (a.elevationGainM ?? 0) > HARD_HIKE_GAIN_M);
+    default:
+      return a.hard === true || srpe >= HARD_SRPE;
+  }
+}
+
+/** Excluded from monotony (§10.2 yoga row). */
+export function excludedFromMonotony(a: Pick<Activity, "sport" | "activity">): boolean {
+  return activityClass(a)?.cls === "yoga";
 }
 
 /** Deterministic order: by date, then id. */

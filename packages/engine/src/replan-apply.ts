@@ -13,8 +13,10 @@ import { floorKm } from "./long-run.js";
 import type { PaceRange } from "./paces.js";
 import type { Phase, Plan, PlanInput, PlanSummary, PlanWeek, VolumeFlag } from "./plan-types.js";
 import { midPace, prescriptionFor, type PaceSet, type Prescription } from "./prescription.js";
-import { currentPaces, isQualityWorkout, type RuleContext } from "./replan-context.js";
+import { currentPaces, isQualityWorkout, qualityAllowedOn, type RuleContext } from "./replan-context.js";
+import { isLowerStrength } from "./strength.js";
 import type { FitnessState, ReplanAction, ReplanChange } from "./replan-types.js";
+import { plannedWeekLoad } from "./rules/load.js";
 import { dayName, workoutLabel } from "./rules/miss.js";
 import { EASY_MIN_MINUTES } from "./scheduler.js";
 import { formatDistance, type Units } from "./units.js";
@@ -155,9 +157,11 @@ export class PlanEditor {
     this.touch(date, rule);
   }
 
-  remove(date: string, rule: string): PlannedWorkout | undefined {
+  /** Remove the run on `date` (never the race); with `strength`, that day's strength session too. */
+  remove(date: string, rule: string, strength = false): PlannedWorkout | undefined {
     const wk = this.weekOf(date);
     if (!wk || !this.editable(date)) return undefined;
+    if (strength) wk.workouts = wk.workouts.filter((x) => !(x.date === date && x.sport === "strength"));
     const i = wk.workouts.findIndex((x) => x.date === date && x.sport === "run" && x.type !== "RACE");
     if (i < 0) return undefined;
     const [gone] = wk.workouts.splice(i, 1);
@@ -334,7 +338,8 @@ function applyOne(ed: PlanEditor, a: ReplanAction, original: ReadonlyMap<string,
       for (const d of datesIn(a.from, a.to)) ed.remove(d, a.rule);
       return;
     case "rest":
-      ed.remove(a.date, a.rule);
+      // Fever / systemic illness: no training at all, strength included (§8 R-ILL-1, D).
+      ed.remove(a.date, a.rule, a.rule.startsWith("R-ILL"));
       return;
     case "scale_paces":
       return;
@@ -365,25 +370,9 @@ function weekKm(ed: PlanEditor, wk: PlanWeek): number {
   return total + weekRuns(ed, wk).filter((w) => ed.editable(w.date)).reduce((a, w) => a + km(w), 0);
 }
 
-interface LockedLike {
-  weekday: string;
-  minutes: number;
-  srpe: number;
-}
-
+/** Lived load on past days + planned load (runs, strength, locked cross-training) on editable days. */
 function weekLoad(ed: PlanEditor, wk: PlanWeek): number {
-  const locked = (ed.ctx.input as Partial<Record<"lockedEvents", readonly LockedLike[]>>).lockedEvents ?? [];
-  let total = 0;
-  for (let i = 0; i < 7; i++) {
-    const d = addDays(wk.startDate, i);
-    if (!ed.editable(d)) {
-      for (const a of actualOn(ed.ctx, d)) total += (a.srpe ?? (a.sport === "run" ? 3 : 4)) * (a.movingS / 60);
-      continue;
-    }
-    const wd = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][(toDayNumber(d) + 3) % 7];
-    for (const e of locked) if (e.weekday === wd) total += e.srpe * e.minutes;
-  }
-  return total + weekRuns(ed, wk).filter((w) => ed.editable(w.date)).reduce((a, w) => a + w.planned.expected_srpe * w.planned.minutes, 0);
+  return plannedWeekLoad(ed.ctx, wk.startDate, ed.weeks);
 }
 
 /**
@@ -543,11 +532,13 @@ export function enforceSchedule(ed: PlanEditor): void {
   for (const w of ed.futureRuns()) {
     if (!w.flags.key_session || w.type === "L" || w.type === "RACE") continue;
     if (keyOn(addDays(w.date, -1)) || keyOn(addDays(w.date, 1))) downgrade(w, "key_adjacent");
+    else if (isQualityWorkout(w) && !qualityAllowedOn(ctx.plan, w.date)) downgrade(w, "after_hard_cross_training");
   }
   for (const wk of ed.weeks) {
-    const keys = wk.workouts.filter((w) => w.flags.key_session && w.type !== "RACE" && (ed.editable(w.date) ? true : keyOn(w.date)));
+    const keys = wk.workouts.filter((w) => w.sport === "run" && w.flags.key_session && w.type !== "RACE" && (ed.editable(w.date) ? true : keyOn(w.date)));
+    const xtCost = (wk.crossTraining ?? []).reduce((a, x) => a + x.keyCost, 0);
     const editableKeys = keys.filter((w) => ed.editable(w.date) && w.type !== "L").sort((a, b) => (a.date < b.date ? 1 : -1));
-    for (let n = keys.length; n > 3 && editableKeys.length > 0; n--) downgrade(editableKeys.shift() as PlannedWorkout, "max_3_keys");
+    for (let n = keys.length + xtCost; n > 3 && editableKeys.length > 0; n--) downgrade(editableKeys.shift() as PlannedWorkout, "max_3_keys");
     // The LR stays the longest run (not in taper / TT weeks).
     if (wk.isTaper || wk.workouts.some((x) => x.type === "TT")) continue;
     const lr = wk.workouts.find((x) => x.type === "L");
@@ -586,11 +577,42 @@ function plannedKmOf(wk: PlanWeek): number {
   return wk.workouts.filter((w) => w.sport === "run" && w.type !== "RACE").reduce((a, w) => a + km(w), 0);
 }
 
+/**
+ * Strength after run changes (§9.5): an editable lower-body session is dropped when a moved or
+ * rebuilt run now breaks ST-3 (LR within 2 days after), ST-4 (quality the next day) or ST-5 (< 48 h
+ * after another lower session). Running takes precedence in replanning (D).
+ */
+export function enforceStrength(ed: PlanEditor): void {
+  const all = ed.weeks.flatMap((w) => w.workouts);
+  const runOn = (d: string) => all.find((w) => w.sport === "run" && w.date === d);
+  const lowerOn = (d: string) => all.some((w) => w.sport === "strength" && w.date === d && isLowerStrength(w) && !w.id.endsWith("-addon"));
+  for (const wk of ed.weeks) {
+    for (const s of [...wk.workouts]) {
+      if (s.sport !== "strength" || !ed.editable(s.date) || !isLowerStrength(s)) continue;
+      const lr = [0, 1, 2].some((k) => {
+        const r = runOn(addDays(s.date, k));
+        return r?.type === "L" || r?.type === "RACE";
+      });
+      const next = runOn(addDays(s.date, 1));
+      const q = next !== undefined && next.flags.key_session && next.type !== "L" && next.type !== "RACE";
+      const st5 = lowerOn(addDays(s.date, -1));
+      if (!lr && !q && !st5) continue;
+      wk.workouts = wk.workouts.filter((x) => x !== s);
+      const i = all.indexOf(s);
+      if (i >= 0) all.splice(i, 1);
+      ed.log.trace.push(`ST:dropped(${s.date},${lr ? "ST-3" : q ? "ST-4" : "ST-5"})`);
+      if (s.date < addDays(ed.ctx.editableFrom, 14)) {
+        ed.log.changes.push({ rule: "SCHED", date: s.date, message: `${dayName(s.date)}'s strength session is dropped: after this week's changes it would sit too close to a hard run.` });
+      }
+    }
+  }
+}
+
 // ── halt ─────────────────────────────────────────────────────────────────────────────────────────
 
 /** Paused plan: nothing gets pushed to the watch for the next 14 days (§8 "stop the plan"). */
 export function clearPushWindow(ed: PlanEditor, rule: string): void {
-  for (const d of datesIn(ed.ctx.editableFrom, addDays(ed.ctx.editableFrom, 13))) ed.remove(d, rule);
+  for (const d of datesIn(ed.ctx.editableFrom, addDays(ed.ctx.editableFrom, 13))) ed.remove(d, rule, true);
 }
 
 // ── regenerated plan merge ───────────────────────────────────────────────────────────────────────
@@ -623,6 +645,9 @@ export function mergeRegenerated(old: Plan, fresh: Plan, editableFrom: string): 
     if (i === 0 && cur) {
       const kept = cur.workouts.filter((x) => x.date < editableFrom);
       r.workouts = [...JSON.parse(JSON.stringify(kept)) as PlannedWorkout[], ...r.workouts.filter((x) => x.date >= editableFrom)];
+      const xtKept = (cur.crossTraining ?? []).filter((x) => x.date < editableFrom);
+      const xtNew = (r.crossTraining ?? []).filter((x) => x.date >= editableFrom);
+      if (xtKept.length + xtNew.length > 0) r.crossTraining = [...JSON.parse(JSON.stringify(xtKept)) as typeof xtKept, ...xtNew];
     } else if (i === 0) {
       r.workouts = r.workouts.filter((x) => x.date >= editableFrom);
     }

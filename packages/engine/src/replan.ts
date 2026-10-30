@@ -20,7 +20,7 @@
  */
 import type { Activity } from "./activity.js";
 import { criticalSpeedFromActivities, uthSanityCheck, vdotFromCriticalSpeed } from "./analysis.js";
-import { addDays } from "./dates.js";
+import { addDays, daysBetween } from "./dates.js";
 import {
   acceptVdotProposal,
   fitnessUpdate,
@@ -31,7 +31,8 @@ import {
 } from "./fitness-update.js";
 import { flattenSteps } from "./matching.js";
 import { generatePlan } from "./plan.js";
-import type { Plan, PlanInput } from "./plan-types.js";
+import { isGeneralFitness, type Plan, type PlanRequest } from "./plan-types.js";
+import { generalFitnessWeeks } from "./general-fitness.js";
 import {
   applyActions,
   applyPaceScale,
@@ -39,6 +40,7 @@ import {
   Builder,
   clearPushWindow,
   enforceSchedule,
+  enforceStrength,
   enforceV1Actual,
   enforceWeeklyGrowth,
   mergeRegenerated,
@@ -47,7 +49,7 @@ import {
   repaceFuture,
   type PaceScale,
 } from "./replan-apply.js";
-import { buildRuleContext, currentPaces, illnessDates, type RuleContext } from "./replan-context.js";
+import { buildRuleContext, currentPaces, illnessDates, weekContaining, type RuleContext } from "./replan-context.js";
 import { currentWeeklyKmFromHistory, longestRun } from "./replan-history.js";
 import type {
   CheckInEvent,
@@ -124,32 +126,42 @@ function currentLadderStage(ctx: RuleContext): number | undefined {
   return t ? Number(t.slice("§6.9:stage".length)) : undefined;
 }
 
-export function deriveInput(ctx: RuleContext, fitness: FitnessState, patches: readonly InputPatch[]): PlanInput {
+/**
+ * The request for a rebuild: the original request (level, schedule, strength config, locked events,
+ * goal) with history-derived volume, longest run and current fitness, starting at the current plan
+ * week. Race date unchanged; a general-fitness plan keeps its end date.
+ */
+export function deriveInput(ctx: RuleContext, fitness: FitnessState, patches: readonly InputPatch[]): PlanRequest {
   const base = ctx.input;
-  const anchor = blockStart(ctx.editableFrom, ctx.raceDate);
+  const anchor = weekContaining(ctx.plan, ctx.editableFrom)?.startDate ?? (ctx.isGeneralFitness ? ctx.editableFrom : blockStart(ctx.editableFrom, ctx.raceDate));
   const lr = longestRun(ctx.runs, ctx.editableFrom, 30);
-  const { vdot: _v, vdotAnchorM: _a, ...rest } = base;
-  const out: PlanInput = {
-    ...rest,
-    today: anchor,
-    currentWeeklyKm: Math.round(currentWeeklyKmFromHistory(ctx.plan, ctx.runs, ctx.editableFrom, base.currentWeeklyKm) * 10) / 10,
-    longestRun30d: lr.km > 0 || lr.minutes > 0 ? lr : base.longestRun30d,
-    vdotStatus: fitness.status,
-  };
-  if (fitness.vdot !== undefined) out.vdot = fitness.vdot;
-  if (fitness.anchorM !== undefined) out.vdotAnchorM = fitness.anchorM;
-  else if (base.vdotAnchorM !== undefined && fitness.vdot === base.vdot) out.vdotAnchorM = base.vdotAnchorM;
+  let currentWeeklyKm = Math.round(currentWeeklyKmFromHistory(ctx.plan, ctx.runs, ctx.editableFrom, base.currentWeeklyKm) * 10) / 10;
+  let longestRun30d = lr.km > 0 || lr.minutes > 0 ? lr : base.longestRun30d;
+  let vdot = fitness.vdot;
+  let vdotStatus = fitness.status;
+  let heavyCrossTraining = base.heavyCrossTraining;
   let stepBack = 0;
   for (const p of patches) {
-    if (p.currentWeeklyKm !== undefined) out.currentWeeklyKm = p.currentWeeklyKm;
-    if (p.longestRun30d !== undefined) out.longestRun30d = { km: Math.round(p.longestRun30d.km * 10) / 10, minutes: Math.round(p.longestRun30d.minutes) };
-    if (p.vdot !== undefined) out.vdot = p.vdot;
-    if (p.vdotStatus !== undefined) out.vdotStatus = p.vdotStatus;
-    if (p.heavyCrossTraining !== undefined) out.heavyCrossTraining = p.heavyCrossTraining;
+    if (p.currentWeeklyKm !== undefined) currentWeeklyKm = p.currentWeeklyKm;
+    if (p.longestRun30d !== undefined) longestRun30d = { km: Math.round(p.longestRun30d.km * 10) / 10, minutes: Math.round(p.longestRun30d.minutes) };
+    if (p.vdot !== undefined) vdot = p.vdot;
+    if (p.vdotStatus !== undefined) vdotStatus = p.vdotStatus;
+    if (p.heavyCrossTraining !== undefined) heavyCrossTraining = p.heavyCrossTraining;
     if (p.ladderStepBack !== undefined) stepBack = Math.max(stepBack, p.ladderStepBack);
   }
+  const { vdot: _v, vdotAnchorM: _a, ladderEntryStage: _l, ...rest } = base;
+  const out = { ...rest, today: anchor, currentWeeklyKm, longestRun30d, vdotStatus, heavyCrossTraining } as PlanRequest;
+  if (vdot !== undefined) out.vdot = vdot;
+  const anchorM = fitness.anchorM ?? (fitness.vdot === base.vdot ? base.vdotAnchorM : undefined);
+  if (anchorM !== undefined) out.vdotAnchorM = anchorM;
+  if (base.ladderEntryStage !== undefined) out.ladderEntryStage = base.ladderEntryStage;
   const stage = currentLadderStage(ctx);
   if (ctx.isLadderPlan && stage !== undefined && !base.canRun20MinContinuous) out.ladderEntryStage = Math.max(1, stage - stepBack);
+  if (isGeneralFitness(out)) {
+    const end = addDays(ctx.raceDate, -1);
+    const remaining = Math.max(1, Math.ceil((daysBetween(anchor, end) + 1) / 7));
+    out.goal = { ...out.goal, weeks: Math.min(remaining, generalFitnessWeeks({ ...out.goal, weeks: remaining })) };
+  }
   return out;
 }
 
@@ -223,7 +235,7 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
 
   let plan = clonePlan(state.plan);
   let regenerated = false;
-  let derivedInput: PlanInput | undefined;
+  let derivedInput: PlanRequest | undefined;
   const notes = [...state.plan.summary.notes];
   const canRebuild = !halt && pending.length > 0 && ctx.editableFrom < ctx.raceDate;
   const derived = deriveInput(ctx, fitness, patches);
@@ -254,13 +266,13 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
   // ── R-RACE after a disruption ──────────────────────────────────────────────────────────────
   const illInWindow = [...illnessDates(ctx)].some((d) => d >= addDays(ctx.raceDate, -56));
   const disruption = ctx.brk ? `${ctx.brk.returnDate}` : illInWindow ? `ill:${ctx.illness.at(-1)?.date ?? today}` : pending.find((r) => r.rule === "R-MISS-4")?.key;
-  if (disruption !== undefined && !halt) {
+  if (disruption !== undefined && !halt && !ctx.isGeneralFitness && !isGeneralFitness(derived)) {
     const race = ruleRace(ctx, { derived, taperWeeks: plan.summary.taperWeeks, disruptionKey: disruption });
     results.push(race);
   }
 
   // ── 5. apply ─────────────────────────────────────────────────────────────────────────────────
-  const builder = new Builder(state.input, fitness);
+  const builder = new Builder(ctx.raceInput, fitness);
   const ed = new PlanEditor(plan, ctx, builder, units);
   const actions: ReplanAction[] = [];
   if (halt) {
@@ -269,8 +281,8 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
     trace.push(`HALT:${halt.rule}(${halt.reason})`);
   } else {
     if (vdotChanged && !regenerated && state.fitness.vdot !== undefined && fitness.vdot !== undefined) {
-      const oldP = currentPaces(state.input, state.fitness.vdot, state.fitness.status);
-      const newP = currentPaces(state.input, fitness.vdot, fitness.status);
+      const oldP = currentPaces(ctx.raceInput, state.fitness.vdot, state.fitness.status);
+      const newP = currentPaces(ctx.raceInput, fitness.vdot, fitness.status);
       repaceFuture(ed, oldP, newP, `FIT-UPDATE:vdot(${state.fitness.vdot.toFixed(1)}->${fitness.vdot.toFixed(1)})`);
     }
     for (const r of results) {
@@ -290,6 +302,7 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
     enforceV1Actual(ed);
     enforceWeeklyGrowth(ed);
     enforceSchedule(ed);
+    enforceStrength(ed);
     changes.push(...ed.log.changes);
   }
 

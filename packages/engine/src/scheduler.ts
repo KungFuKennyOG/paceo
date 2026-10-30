@@ -6,9 +6,12 @@
  * §7.2). Plan weeks are 7-day blocks ending on race day (dates.ts), so after rotation a template may
  * wrap across the block boundary; all spacing rules use absolute days, so that is safe.
  *
- * TODO(§7.1 step 1, §10.2): place locked cross-training first and apply its 24 h rules.
+ * §7.1 step 1 (locked cross-training) reaches placeWeek as `qualityBlockedDays`: the generator
+ * expands the locked events (cross-training.ts) and blocks quality on and after every hard / team /
+ * HIIT session and after external lower-body lifting. Step 5 (strength, §9.5) and fallbacks 4–5 run
+ * after all runs are placed (strength-schedule.ts, plan.ts).
+ *
  * TODO(§7.1 step 4): respect max_session_minutes_by_day.
- * TODO(§7.1 step 5, §9.5): strength placement; fallbacks 4–5 (drop strength, move cross-training).
  */
 
 export type SlotRole = "L" | "Q1" | "Q2" | "Q2_IF_EASY_LR" | "E" | "REC" | "E_SHORT" | "RW";
@@ -29,7 +32,7 @@ const TEMPLATE_LR_COLUMN = 6;
 
 const slot = (offset: number, role: SlotRole): TemplateSlot => ({ offset, role });
 
-/** §7.2 templates (Sunday long run). The 2-day row is the race-mode version: Q + L (D). */
+/** §7.2 templates (Sunday long run). The 2-day row is the race-mode version: Q + L (D); general fitness uses E + L. */
 const TEMPLATES: Record<number, readonly TemplateSlot[]> = {
   2: [slot(1, "Q1"), slot(6, "L")],
   3: [slot(1, "Q1"), slot(3, "E"), slot(6, "L")],
@@ -39,6 +42,9 @@ const TEMPLATES: Record<number, readonly TemplateSlot[]> = {
   7: [slot(0, "REC"), slot(1, "Q1"), slot(2, "E"), slot(3, "Q2"), slot(4, "E_SHORT"), slot(5, "E"), slot(6, "L")],
 };
 
+/** §7.2 2-day row, "general fitness only": Tue E (+ strength), Sun L. */
+const GENERAL_FITNESS_2_DAY: readonly TemplateSlot[] = [slot(1, "E"), slot(6, "L")];
+
 /** Beginner ladder: Mon / Wed / Sat run/walk (§7.2). */
 const LADDER_TEMPLATE: readonly TemplateSlot[] = [slot(0, "RW"), slot(2, "RW"), slot(5, "RW")];
 
@@ -47,6 +53,8 @@ export interface TemplateOptions {
   noConsecutiveDays?: boolean;
   /** Offset of the long-run weekday inside the plan week; default 6 (unrotated). */
   lrOffset?: number;
+  /** General-fitness mode: the 2-day row is E + L (§7.2). */
+  generalFitness?: boolean;
 }
 
 /**
@@ -56,7 +64,8 @@ export interface TemplateOptions {
  */
 export function weekTemplate(runDays: number, opts: TemplateOptions = {}): TemplateSlot[] {
   const days = opts.noConsecutiveDays ? Math.min(3, runDays) : runDays;
-  const t = opts.ladder ? LADDER_TEMPLATE : TEMPLATES[Math.min(7, Math.max(2, days))];
+  const n = Math.min(7, Math.max(2, days));
+  const t = opts.ladder ? LADDER_TEMPLATE : opts.generalFitness && n === 2 ? GENERAL_FITNESS_2_DAY : TEMPLATES[n];
   if (!t) throw new RangeError(`no template for ${runDays} run days`);
   const shift = (opts.lrOffset ?? TEMPLATE_LR_COLUMN) - TEMPLATE_LR_COLUMN;
   return t.map((s) => ({ ...s, offset: (s.offset + shift + 7) % 7 })).sort((a, b) => a.offset - b.offset);
@@ -77,6 +86,13 @@ export interface PlacementInput {
   /** Absolute race day; with `minDaysBeforeRace`, no quality closer to it (§6.8 T3). */
   raceDay?: number;
   minDaysBeforeRace?: number;
+  /**
+   * Absolute days that may not hold a quality session (§7.1 step 4, §10.2, §9.6): the day of and the
+   * day after a hard cross-training, team-sport or HIIT session; the day after external lower lifting (ST-4).
+   */
+  qualityBlockedDays?: ReadonlySet<number>;
+  /** The subset of `qualityBlockedDays` caused only by flexible (non-locked) sessions, for fallback 5. */
+  flexibleBlockedDays?: ReadonlySet<number>;
 }
 
 export interface Placement {
@@ -117,9 +133,14 @@ export function placeWeek(input: PlacementInput): Placement {
   }
   if (race !== undefined) keyDays.push(input.weekStartDay + race);
 
-  const legal = (offset: number) => {
+  const blocked = input.qualityBlockedDays ?? new Set<number>();
+  const flexible = input.flexibleBlockedDays ?? new Set<number>();
+  /** `ignore`: which cross-training blocks to disregard (only used to explain a conversion). */
+  const legal = (offset: number, ignore: "none" | "flexible" | "all" = "none") => {
     const day = input.weekStartDay + offset;
     if (taken.has(offset)) return false;
+    const xtOk = ignore === "all" || !blocked.has(day) || (ignore === "flexible" && flexible.has(day));
+    if (!xtOk) return false;
     if (input.raceDay !== undefined && input.raceDay - day < (input.minDaysBeforeRace ?? MIN_KEY_GAP_DAYS)) return false;
     return keyDays.every((k) => Math.abs(day - k) >= MIN_KEY_GAP_DAYS);
   };
@@ -136,11 +157,15 @@ export function placeWeek(input: PlacementInput): Placement {
     if (preferred !== undefined && legal(preferred)) {
       chosen = preferred;
     } else {
-      chosen = candidates.find(legal);
+      chosen = candidates.find((o) => legal(o));
       if (chosen !== undefined) trace.push(`S:fallback1:move_${label}->d${chosen}`);
     }
     if (chosen === undefined) {
       trace.push(`S:fallback2:${label}->E+S`);
+      // Fallback 5: a flexible cross-training session is all that stands in the way (§7.1, §10.2);
+      // fallback 6: locked sessions are, so the loss is reported.
+      if (preferred !== undefined && legal(preferred, "flexible")) trace.push(`S:fallback5:flexible_xt_blocks_d${preferred}`);
+      else if (preferred !== undefined && legal(preferred, "all")) trace.push(`S:fallback6:locked_xt_blocks_d${preferred}`);
     } else {
       taken.add(chosen);
       keyDays.push(input.weekStartDay + chosen);

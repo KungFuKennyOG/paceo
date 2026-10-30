@@ -6,7 +6,7 @@
 import type { Activity, ActivitySport } from "./activity.js";
 import type { HrMaxSource } from "./analysis.js";
 import type { MatchResult } from "./matching.js";
-import type { Alternative, Plan, PlanInput, VdotStatus } from "./plan-types.js";
+import type { Alternative, Plan, PlanRequest, VdotStatus } from "./plan-types.js";
 import type { Units } from "./units.js";
 
 // ── fitness state (§4.10) ────────────────────────────────────────────────────────────────────────
@@ -246,8 +246,8 @@ export interface ReplanOptions {
 
 export interface ReplanState {
   plan: Plan;
-  /** The PlanInput the plan was generated from (race date, level, goal, schedule). */
-  input: PlanInput;
+  /** The request the plan was generated from (race or general fitness; level, goal, schedule, strength, locked events). */
+  input: PlanRequest;
   fitness: FitnessState;
   activities: readonly Activity[];
   hrv?: readonly HrvNight[];
@@ -276,8 +276,8 @@ export interface ReplanResult {
   actions: ReplanAction[];
   halted?: Halt;
   regenerated: boolean;
-  /** The PlanInput passed to generatePlan when regenerated. */
-  derivedInput?: PlanInput;
+  /** The request passed to generatePlan when regenerated. */
+  derivedInput?: PlanRequest;
   matching: MatchResult;
   metrics: ReplanMetrics;
   /** Re-push window (§8 "re-push the next 14 days"). */

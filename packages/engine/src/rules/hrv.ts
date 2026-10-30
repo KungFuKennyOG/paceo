@@ -10,7 +10,7 @@
  *           2 consecutive nights acts like R-HRV-2 (Kiviniemi rule).
  */
 import { addDays } from "../dates.js";
-import { dateRange, isKeyDay, isQualityWorkout, weekContaining, type RuleContext } from "../replan-context.js";
+import { dateRange, isKeyDay, isQualityWorkout, qualityAllowedOn, weekContaining, type RuleContext } from "../replan-context.js";
 import { emptyResult, type HrvNight, type RuleResult } from "../replan-types.js";
 import { dayName, workoutLabel } from "./miss.js";
 import type { PlannedWorkout } from "../workout.js";
@@ -113,7 +113,7 @@ export function ruleHrv(ctx: RuleContext): RuleResult {
   future.set(today.date, undefined);
   const slot = dateRange(addDays(today.date, 2), end).find((d) => {
     const host = ctx.runOn.get(d);
-    if (!host || host.flags.key_session || isQualityWorkout(host) || d >= ctx.raceDate) return false;
+    if (!host || host.flags.key_session || isQualityWorkout(host) || d >= ctx.raceDate || !qualityAllowedOn(ctx.plan, d)) return false;
     return !isKeyDay(ctx, addDays(d, -1), future) && !isKeyDay(ctx, addDays(d, 1), future);
   });
   if (slot) out.actions.push({ kind: "move", rule, workoutId: today.id, fromDate: today.date, toDate: slot, reason: "quality moved after a low-readiness day" });

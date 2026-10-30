@@ -8,7 +8,8 @@ import { isHardDay, sortActivities } from "./activity.js";
 import { addDays, toDayNumber } from "./dates.js";
 import { matchActivities, type MatchResult, type WorkoutMatch } from "./matching.js";
 import { planPaces, prescriptionFor, type PaceSet } from "./prescription.js";
-import type { GoalDistance, Level, Plan, PlanInput, PlanWeek, VdotStatus } from "./plan-types.js";
+import { isGeneralFitness, type GoalDistance, type Level, type Plan, type PlanInput, type PlanRequest, type PlanWeek, type VdotStatus } from "./plan-types.js";
+import { generalFitnessAsRaceInput } from "./general-fitness.js";
 import { detectBreak, illnessEpisodes, sortEvents, v1History, type BreakInfo } from "./replan-history.js";
 import type { CheckInEvent, FitnessState, HrvNight, IllnessEvent, ReplanState } from "./replan-types.js";
 import { v1Limit, v1Measure, v1Reference, type RunRecord, type V1Limit, type V1Seed } from "./v1.js";
@@ -22,8 +23,13 @@ export interface RuleContext {
   /** First day the replanner may change: today, or tomorrow once a run is logged today. */
   editableFrom: string;
   plan: Plan;
-  input: PlanInput;
+  /** The original request (race or general fitness). */
+  input: PlanRequest;
+  /** Race-shaped view of it, for paces and feasibility (general fitness → its reference distance). */
+  raceInput: PlanInput;
+  isGeneralFitness: boolean;
   level: Level;
+  /** Race day; for general fitness the day after the plan ends (nothing is scheduled from then). */
   raceDate: string;
   goalDistance: GoalDistance;
   goalTimeS?: number;
@@ -53,13 +59,20 @@ export interface RuleContext {
 
 // ── PlanInput adapter ────────────────────────────────────────────────────────────────────────────
 
-export function inputFacts(input: PlanInput): { raceDate: string; distance: GoalDistance; goalTimeS?: number; level: Level } {
+export function raceView(input: PlanRequest): PlanInput {
+  return isGeneralFitness(input) ? generalFitnessAsRaceInput(input) : input;
+}
+
+export function inputFacts(input: PlanRequest, plan: Plan): { raceDate: string; distance: GoalDistance; goalTimeS?: number; level: Level } {
+  const race = raceView(input);
+  const lastWeek = plan.weeks[plan.weeks.length - 1];
+  const end = plan.summary.endDate ?? (lastWeek ? addDays(lastWeek.startDate, 6) : race.raceDate);
   const out: { raceDate: string; distance: GoalDistance; goalTimeS?: number; level: Level } = {
-    raceDate: input.raceDate,
-    distance: input.goal.distance,
+    raceDate: isGeneralFitness(input) ? addDays(end, 1) : race.raceDate,
+    distance: race.goal.distance,
     level: input.level,
   };
-  if (input.goal.timeS !== undefined) out.goalTimeS = input.goal.timeS;
+  if (!isGeneralFitness(input) && race.goal.timeS !== undefined) out.goalTimeS = race.goal.timeS;
   return out;
 }
 
@@ -100,8 +113,9 @@ export function buildRuleContext(state: ReplanState, rawEvents: readonly CheckIn
   const workouts = state.plan.weeks.flatMap((w) => w.workouts).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   const runOn = new Map<string, PlannedWorkout>();
   for (const w of workouts) if (w.sport === "run") runOn.set(w.date, w);
-  const facts = inputFacts(state.input);
-  const paces = currentPaces(state.input, fitness.vdot, fitness.status);
+  const facts = inputFacts(state.input, state.plan);
+  const race = raceView(state.input);
+  const paces = currentPaces(race, fitness.vdot, fitness.status);
   const rx = prescriptionFor(facts.level, fitness.status, paces);
   const accepted = new Set<string>();
   const declined = new Set<string>();
@@ -116,6 +130,8 @@ export function buildRuleContext(state: ReplanState, rawEvents: readonly CheckIn
     editableFrom: ranToday ? addDays(today, 1) : today,
     plan: state.plan,
     input: state.input,
+    raceInput: race,
+    isGeneralFitness: isGeneralFitness(state.input),
     level: facts.level,
     raceDate: facts.raceDate,
     goalDistance: facts.distance,
@@ -166,7 +182,18 @@ export function isKeyDay(ctx: RuleContext, date: string, future?: ReadonlyMap<st
     return ctx.activities.some((a) => a.date === date && a.sport !== "run" && isHardDay(a));
   }
   const w = future?.has(date) ? future.get(date) : ctx.runOn.get(date);
-  return w?.flags.key_session === true;
+  return w?.flags.key_session === true || hardCrossTrainingOn(ctx.plan, date);
+}
+
+/** A planned locked cross-training session on `date` that blocks quality that day and the next (§10.2). */
+export function hardCrossTrainingOn(plan: Plan, date: string): boolean {
+  return plan.weeks.some((w) => (w.crossTraining ?? []).some((x) => x.date === date && (x.hard || x.blocksNextDayQuality)));
+}
+
+/** Quality may go on `date`: no blocking cross-training that day or the day before (§7.1 step 4). */
+export function qualityAllowedOn(plan: Plan, date: string): boolean {
+  const blocks = (d: string) => plan.weeks.some((w) => (w.crossTraining ?? []).some((x) => x.date === d && x.blocksNextDayQuality));
+  return !blocks(date) && !blocks(addDays(date, -1));
 }
 
 /** Actual runs before `editableFrom` plus planned runs from `editableFrom` up to (not incl.) `date`. */

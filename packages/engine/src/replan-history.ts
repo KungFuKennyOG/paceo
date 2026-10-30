@@ -3,7 +3,7 @@
  * §10.1 load channels). Pure functions of the activity list and a local "today".
  */
 import type { Activity } from "./activity.js";
-import { isAerobicCrossTraining, sessionLoad, SPORT_CLASS } from "./activity.js";
+import { activityLoad, excludedFromMonotony, isAerobicCrossTraining } from "./activity.js";
 import { addDays, daysBetween, toDayNumber } from "./dates.js";
 import type { Plan } from "./plan-types.js";
 import type { CheckInEvent, IllnessEvent } from "./replan-types.js";
@@ -176,9 +176,9 @@ export function dailyLoads(activities: readonly Activity[], from: string, toExcl
   const out = new Array<number>(n).fill(0);
   for (const a of activities) {
     if (a.date < from || a.date >= toExclusive) continue;
-    if (!includeMonotonyExcluded && SPORT_CLASS[a.sport].excludeFromMonotony) continue;
+    if (!includeMonotonyExcluded && excludedFromMonotony(a)) continue;
     const i = daysBetween(from, a.date);
-    out[i] = (out[i] ?? 0) + sessionLoad(a);
+    out[i] = (out[i] ?? 0) + activityLoad(a);
   }
   return out;
 }
