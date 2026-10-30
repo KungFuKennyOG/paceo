@@ -82,7 +82,7 @@ function modification(rule: string, suffix: string, u: Units): string | undefine
   let m: RegExpExecArray | null;
   if ((m = /^vol×([\d.]+)$/.exec(suffix))) return `Volume set to ${Math.round(Number(m[1]) * 100)}% because of ${why}.`;
   if ((m = /^pace×([\d.]+)$/.exec(suffix))) return `Paces are ${((1 / Number(m[1]) - 1) * 100).toFixed(1)}% slower because of ${why}.`;
-  if ((m = /^easy\(was:(\w*)\)$/.exec(suffix))) return `Changed from a ${TYPE[m[1] ?? ""] ?? "session"} to an easy run because of ${why}.`;
+  if ((m = /^easy\(was:(\w*)\)$/.exec(suffix))) return `Now an easy run instead of the planned ${TYPE[m[1] ?? ""] ?? "session"}, because of ${why}.`;
   if ((m = /^shorten×([\d.]+)$/.exec(suffix))) return `Shortened by ${Math.round((1 - Number(m[1])) * 100)}% because of ${why}.`;
   if ((m = /^LR≤([\d.]+)$/.exec(suffix))) return `Long run held at ${km(m[1], u)} because of ${why}.`;
   if ((m = /^week≤([\d.]+)$/.exec(suffix))) return `This week's volume is held at ${km(m[1], u)} because of ${why}.`;
@@ -217,6 +217,47 @@ const TEMPLATES: Record<string, Tpl> = {
   "W-M": (r, id, u) => `Marathon-pace block of about ${km(r[0]?.replace("km", ""), u)}.`,
   "W-GP": (r) => `Goal-pace work for your ${DIST[r[0] ?? ""] ?? "race"}.`,
   "W-TT": () => "Time trial: a 3K all-out effort to set your paces.",
+
+  // ── strength (§9), cross-training (§10), general fitness (§6.1) ──
+  ST: (r) => {
+    const s = r.join(":");
+    if (s === "rest_day") return "Strength on a rest day from running.";
+    if (s.startsWith("dropped(")) return "A strength session was dropped so it doesn't sit too close to a hard run after replanning.";
+    return "Strength placement rule applied.";
+  },
+  "ST-1": () => "Strength comes after a hard run, on the same day, so the next day stays easy.",
+  "ST-2": () => "Strength paired with an easy run.",
+  "ST-3": () => "No heavy lower-body strength in the 2 days before a long run.",
+  "ST-4": () => "No heavy lower-body strength the day before a hard run.",
+  "ST-5": () => "At least 48 hours between lower-body strength sessions.",
+  "ST-6": () => "Run first, then lift at least 6 hours later if you can.",
+  "ST-7": () => "Strength kept apart from hard cross-training days.",
+  "ST-8": () => "Core work kept light because your cross-training already loads the trunk.",
+  XT: (r) => {
+    const s = r[0] ?? "";
+    if (s === "hard_day_before_LR") return "Your fixed hard cross-training falls the day before a long run; we kept it and flagged it.";
+    if (s === "hard_in_race_week") return "Hard cross-training in race week: consider keeping it light.";
+    if (s.endsWith("blocks_quality")) return "No hard run the day of or after your hard cross-training.";
+    return "Cross-training rule applied.";
+  },
+  "§10.2": (r) => {
+    const s = r.join(":");
+    if (s === "team_sport_day") return "Team-sport day: no heavy legs or plyometrics.";
+    if (s === "locked" || s === "flexible") return `This cross-training is ${s === "locked" ? "fixed in your week" : "flexible"}.`;
+    if (s.startsWith("hard_rule") || s.startsWith("user_")) return "Cross-training intensity classified as hard or easy for scheduling.";
+    return "Cross-training counted in your training load (never as running km).";
+  },
+  "§6.4": () => "A hard cross-training day counts as half a key session this week.",
+  "§6.1": () => "General-fitness plan: volume set from your target.",
+  "§2.4": () => "Conservative settings: no plyometrics and no heavy strength work.",
+  "§9.2": (r) => (r[0]?.startsWith("dropped_") ? "An exercise was left out to fit the time you have." : r[0]?.startsWith("technique") || r[0]?.startsWith("beginner") ? "Technique block: learn the movements before adding load." : "Strength session layout for your settings."),
+  "§9.4": (r) => (r[0] === "cutback_-40%_sets" ? "Cutback week: 40% fewer sets." : r[0] === "race-3" ? "No strength in the last 3 days before the race." : r[0]?.startsWith("last_heavy") ? "Heavy strength stops well before the race." : "Strength intensity set by the training phase."),
+  "§9.3": () => "Exercises chosen from the strength library for this session's focus.",
+  "§9.5": (r) => {
+    const m = /^plyo_rung(\d+)_(\d+)$/.exec(r.join(":"));
+    return m ? `Plyometrics: stage ${m[1]}, about ${m[2]} contacts.` : "Plyometric progression.";
+  },
+  "§9.6": () => "Fits around your own lifting program.",
 
   // ── replanning (§8), FIT-UPDATE (§4.10) ──
   "R-MISS": () => "Missed sessions are dropped, not made up.",

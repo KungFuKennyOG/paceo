@@ -615,6 +615,8 @@ export function criticalSpeedFromActivities(
   activities: readonly Activity[],
   today: string,
   level: string,
+  /** Only genuinely hard efforts feed the fit (§4.5): races, TTs, quality sessions. Default: races/TTs/sRPE ≥ 7. */
+  isHard: (a: Activity) => boolean = (a) => a.isRace || a.isTimeTrial === true || (a.srpe ?? 0) >= 7,
 ): CriticalSpeedResult {
   const from = addDays(today, -CS_WINDOW_DAYS);
   const runs = activities.filter((a) => a.sport === "run" && a.date > from && a.date <= today);
@@ -623,7 +625,7 @@ export function criticalSpeedFromActivities(
     return { status: "insufficient", reason: `${runs.length}<${CS_MIN_ACTIVITIES} runs in 16 weeks`, activities: runs.length };
   }
   const best = new Map<number, Effort>();
-  for (const a of runs) {
+  for (const a of runs.filter(isHard)) {
     for (const e of activityBestEfforts(a)) {
       const cur = best.get(e.distanceM);
       if (!cur || e.timeS < cur.timeS) best.set(e.distanceM, e);
@@ -633,8 +635,8 @@ export function criticalSpeedFromActivities(
   const use = (preferred ? CS_PREFERRED_DISTANCES_M : BEST_EFFORT_DISTANCES_M)
     .map((d) => best.get(d))
     .filter((e): e is Effort => e !== undefined);
-  const fit = fitCriticalSpeed(use);
-  if (!fit) return { status: "insufficient", reason: "fewer than 2 best-effort distances", activities: runs.length };
+  const fit = use.length >= 3 ? fitCriticalSpeed(use) : undefined;
+  if (!fit) return { status: "insufficient", reason: "fewer than 3 hard best-effort distances", activities: runs.length };
   return { status: "ok", activities: runs.length, ...fit };
 }
 

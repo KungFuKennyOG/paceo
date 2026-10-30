@@ -75,7 +75,7 @@ export class Builder {
 
 // ── editor ───────────────────────────────────────────────────────────────────────────────────────
 
-const STALE = [/^V1:ok/, /^L3:/, /^W-/, /^CAP:/, /^Q:work/, /:pace×/, /^V1:trimmed/, /^V1:shortened/];
+const STALE = [/^V2:replan_cap/, /^V1:ok/, /^L3:/, /^W-/, /^CAP:/, /^Q:work/, /:pace×/, /^V1:trimmed/, /^V1:shortened/];
 
 function keepTrace(t: readonly string[]): string[] {
   return t.filter((x) => !STALE.some((r) => r.test(x)));
@@ -555,6 +555,7 @@ export function enforceSchedule(ed: PlanEditor): void {
 
 /** V2 "never above 30%" week over week, on planned km: easy runs first, then the long run (D). */
 export const V2_FACTOR = 1.3;
+export const V2_RETURN_FLOOR = 0.75;
 
 export function enforceWeeklyGrowth(ed: PlanEditor): void {
   for (let i = 1; i < ed.weeks.length; i++) {
@@ -563,7 +564,11 @@ export function enforceWeeklyGrowth(ed: PlanEditor): void {
     if (prev.isLadder || wk.isLadder || addDays(wk.startDate, 6) < ed.ctx.editableFrom) continue;
     const prevKm = plannedKmOf(prev);
     if (prevKm <= 0) continue;
-    const cap = V2_FACTOR * prevKm;
+    // After a week that was cut well below its target (illness, pain, a break ramp), the next week may
+    // come back to the ramp's 75% level of its own target; from there the 30% rule applies again (D).
+    // Judged from the plan alone, so a second replan reaches the same fixed point.
+    const cut = prevKm < V2_RETURN_FLOOR * prev.targetKm;
+    const cap = Math.max(V2_FACTOR * prevKm, cut ? V2_RETURN_FLOOR * wk.targetKm : 0);
     const excess = (w: PlanWeek) => plannedKmOf(w) - cap;
     if (excess(wk) <= 0.05) continue;
     trimWeek(ed, wk.startDate, "V2", `V2:replan_cap(${cap.toFixed(1)})`, excess, (w) => km(w));
@@ -643,6 +648,8 @@ export function mergeRegenerated(old: Plan, fresh: Plan, editableFrom: string): 
   fresh.weeks.forEach((w, i) => {
     const r = renumber(w);
     if (i === 0 && cur) {
+      // Past days were sized against the old week; keep the larger target so its caps still hold.
+      r.targetKm = Math.max(r.targetKm, cur.targetKm);
       const kept = cur.workouts.filter((x) => x.date < editableFrom);
       r.workouts = [...JSON.parse(JSON.stringify(kept)) as PlannedWorkout[], ...r.workouts.filter((x) => x.date >= editableFrom)];
       const xtKept = (cur.crossTraining ?? []).filter((x) => x.date < editableFrom);

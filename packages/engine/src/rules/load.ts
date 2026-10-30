@@ -12,7 +12,7 @@ import { addDays } from "../dates.js";
 import { weeklyLoad } from "../load.js";
 import type { PlanWeek } from "../plan-types.js";
 import { crossTrainingShare, dailyLoads, loadBetween } from "../replan-history.js";
-import { weekContaining, type RuleContext } from "../replan-context.js";
+import { illnessDates, weekContaining, type RuleContext } from "../replan-context.js";
 import { emptyResult, type ReplanMetrics, type RuleResult } from "../replan-types.js";
 
 export const LOAD_SPIKE_FACTOR = 1.3;
@@ -66,8 +66,12 @@ export function ruleLoad(ctx: RuleContext): RuleResult {
   if (!cur) return out;
   let triggers = 0;
   // A return from a break is R-BREAK's ramp; the break weeks would deflate the 4-week baseline (D).
-  const starts = ctx.brk ? [] : [cur.startDate, addDays(cur.startDate, 7)];
+  // Same for the 14 days after an illness (R-ILL-4 owns that return).
+  const ill = illnessDates(ctx);
+  const recentIllness = [...ill].some((d) => d >= addDays(ctx.today, -14));
+  const starts = ctx.brk || recentIllness ? [] : [cur.startDate, addDays(cur.startDate, 7)];
   if (ctx.brk) out.trace.push("R-LOAD-2:superseded_by_R-BREAK");
+  else if (recentIllness) out.trace.push("R-LOAD-2:superseded_by_R-ILL");
   for (const start of starts) {
     const mean = prior4WeekMean(ctx, start);
     if (mean === undefined || mean <= 0) continue;
@@ -86,7 +90,8 @@ export function ruleLoad(ctx: RuleContext): RuleResult {
   const share = crossTrainingShare(ctx.activities, addDays(ctx.today, -28), ctx.today);
   if ((share > XT_SHARE_2TO1 || triggers >= 2) && !ctx.input.heavyCrossTraining) {
     out.inputPatch = { heavyCrossTraining: true };
-    out.changes.push({ rule: "R-LOAD-4", message: `Cross-training is ${Math.round(share * 100)}% of your training load, so lighter "cutback" weeks will come every 3rd week when the plan is next rebuilt.` });
+    const why = share > XT_SHARE_2TO1 ? `Cross-training is ${Math.round(share * 100)}% of your training load` : "Your load jumped two weeks running";
+    out.changes.push({ rule: "R-LOAD-4", message: `${why}, so lighter "cutback" weeks will come every 3rd week when the plan is next rebuilt.` });
   }
   return out;
 }

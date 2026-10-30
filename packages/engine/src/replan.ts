@@ -20,7 +20,7 @@
  */
 import type { Activity } from "./activity.js";
 import { criticalSpeedFromActivities, uthSanityCheck, vdotFromCriticalSpeed } from "./analysis.js";
-import { addDays, daysBetween } from "./dates.js";
+import { addDays, daysBetween, toDayNumber } from "./dates.js";
 import {
   acceptVdotProposal,
   fitnessUpdate,
@@ -74,6 +74,8 @@ import { perfVerdict, scoreSessions, sessionEvidence } from "./rules/perf.js";
 import { ruleRace } from "./rules/race.js";
 
 export const REPUSH_DAYS = 14;
+/** CS fit quality needed before it can veto a raise (D). */
+export const CS_MIN_R2 = 0.9;
 const MARKER_PREFIX = "replan:";
 
 function trusted(s: FitnessState["status"]): boolean {
@@ -178,8 +180,10 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
   const scores = scoreSessions(ctx);
   const verdict = perfVerdict(scores);
   trace.push(`R-PERF:${verdict.verdict}(${verdict.used.length})`);
-  const cs = criticalSpeedFromActivities(ctx.activities, today, ctx.level);
-  const csVdot = cs.status === "ok" ? vdotFromCriticalSpeed(cs.csMps) : undefined;
+  const qualityIds = new Set(ctx.match.workouts.filter((m) => ["T", "I", "R", "H", "TT", "RACE"].includes(m.type)).flatMap((m) => m.activityIds));
+  const cs = criticalSpeedFromActivities(ctx.activities, today, ctx.level, (a) => a.isRace || a.isTimeTrial === true || qualityIds.has(a.id));
+  // Cross-check only with a good fit (§4.5 "not a driver").
+  const csVdot = cs.status === "ok" && cs.r2 >= CS_MIN_R2 ? vdotFromCriticalSpeed(cs.csMps) : undefined;
   const lastIll = ctx.illness.filter((e) => e.resolvedDate !== undefined && e.resolvedDate <= today).at(-1);
   const hrIgnore = [ctx.brk ? addDays(ctx.brk.returnDate, 7) : undefined, lastIll?.resolvedDate ? addDays(lastIll.resolvedDate, 7) : undefined]
     .filter((x): x is string => x !== undefined)
@@ -256,6 +260,11 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
         notes.push(`${MARKER_PREFIX}${r.key}`);
         trace.push(`REPLAN:rebuild(${r.rule}:${r.reason})`);
       }
+      // A rebuild seeded with a patched longest run (no actual run in the window, e.g. > 28 days off)
+      // uses it as generatePlan does: dated the day before (D, §6.5 "no history → entered run").
+      if (pending.some((r) => r.patch.longestRun30d !== undefined)) {
+        ctx.v1Seed = { day: toDayNumber(ctx.editableFrom) - 1, km: derived.longestRun30d.km, minutes: derived.longestRun30d.minutes };
+      }
       changes.push({ rule: "REPLAN", message: `Rebuilt your plan from ${ctx.editableFrom} to race day (${fresh.summary.weeks} weeks, taper kept at ${fresh.summary.taperWeeks} week(s)).` });
       trace.push(`R-RACE-1:taper_kept(${fresh.summary.taperWeeks}wk)`);
     } else {
@@ -274,6 +283,10 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
   // ── 5. apply ─────────────────────────────────────────────────────────────────────────────────
   const builder = new Builder(ctx.raceInput, fitness);
   const ed = new PlanEditor(plan, ctx, builder, units);
+  if (regenerated) {
+    const cur = ed.weekOf(ctx.editableFrom);
+    if (cur) ed.touched.set(cur.index, new Set(["REPLAN"]));
+  }
   const actions: ReplanAction[] = [];
   if (halt) {
     clearPushWindow(ed, halt.rule);
@@ -299,9 +312,14 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
       applyPaceScale(ed, s);
     }
     applyActions(ed, actions, plan);
-    enforceV1Actual(ed);
-    enforceWeeklyGrowth(ed);
-    enforceSchedule(ed);
+    // Guards to a fixed point: V2 / §7.1 trims can lower a later run's V1 reference (they only shrink).
+    for (let i = 0; i < 4; i++) {
+      const before = JSON.stringify(ed.weeks);
+      enforceV1Actual(ed);
+      enforceWeeklyGrowth(ed);
+      enforceSchedule(ed);
+      if (JSON.stringify(ed.weeks) === before) break;
+    }
     enforceStrength(ed);
     changes.push(...ed.log.changes);
   }

@@ -52,12 +52,19 @@ export function activityFor(w: PlannedWorkout, o: RunOptions = {}): Activity {
   return a;
 }
 
-/** Every planned run in [from, toExclusive) done as planned, except dates in `skip`. */
+/** Every planned session in [from, toExclusive) done as planned (strength logged too), except `skip`. */
 export function ranAsPlanned(plan: Plan, from: string, toExclusive: string, skip: (w: PlannedWorkout) => boolean = () => false, o: (w: PlannedWorkout) => RunOptions = () => ({})): Activity[] {
-  return plan.weeks
-    .flatMap((w) => w.workouts)
-    .filter((w) => w.sport === "run" && w.type !== "RACE" && w.date >= from && w.date < toExclusive && !skip(w))
-    .map((w) => activityFor(w, o(w)));
+  const ws = plan.weeks.flatMap((w) => w.workouts).filter((w) => w.type !== "RACE" && w.date >= from && w.date < toExclusive && !skip(w));
+  // Locked cross-training (e.g. persona B's paddling) happens too.
+  const xt: Activity[] = plan.weeks
+    .flatMap((w) => w.crossTraining ?? [])
+    .filter((x) => x.date >= from && x.date < toExclusive)
+    .map((x) => ({ id: `xt-${x.date}-${x.cls}`, date: x.date, sport: "other" as const, activity: x.activity, distanceM: 0, movingS: x.minutes * 60, isRace: false, srpe: x.expectedSrpe, hard: x.hard }));
+  return [...xt, ...ws.map((w) =>
+    w.sport === "run"
+      ? activityFor(w, o(w))
+      : { id: `str-${w.date}`, date: w.date, sport: "strength" as const, distanceM: 0, movingS: w.planned.minutes * 60, isRace: false, srpe: w.planned.expected_srpe },
+  )];
 }
 
 /** Runs before the plan started, consistent with the persona's entered history. */

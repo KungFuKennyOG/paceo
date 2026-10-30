@@ -145,7 +145,12 @@ export function currentWeeklyKmFromHistory(plan: Plan, runs: readonly Activity[]
   const done = plan.weeks.filter((w) => addDays(w.startDate, 7) <= today && !w.isCutback && !w.isTaper);
   const weeks = done.slice(-4).map((w) => kmBetween(runs, w.startDate, addDays(w.startDate, 7)));
   const firstStart = plan.weeks[0]?.startDate ?? today;
-  for (let i = 1; weeks.length < 4; i++) weeks.push(kmBetween(runs, addDays(firstStart, -7 * i), addDays(firstStart, -7 * (i - 1))));
+  // Before the plan: actual km where any run was logged, else the volume entered at onboarding.
+  for (let i = 1; weeks.length < 4; i++) {
+    const from = addDays(firstStart, -7 * i);
+    const to = addDays(firstStart, -7 * (i - 1));
+    weeks.push(runs.some((r) => r.sport === "run" && r.date >= from && r.date < to) ? kmBetween(runs, from, to) : fallbackKm);
+  }
   return median(weeks);
 }
 
