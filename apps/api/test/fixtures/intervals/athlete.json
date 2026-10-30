@@ -1,0 +1,6 @@
+{
+  "id": "i123456",
+  "name": "Kenny Runner",
+  "timezone": "America/Toronto",
+  "sportSettings": [{ "types": ["Run", "VirtualRun", "TrailRun"], "threshold_pace": 3.4 }]
+}

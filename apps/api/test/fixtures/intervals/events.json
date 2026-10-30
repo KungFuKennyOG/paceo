@@ -1,0 +1,5 @@
+[
+  { "id": 70001, "category": "WORKOUT", "start_date_local": "2026-11-02T00:00:00", "name": "Easy run", "external_id": "u1:w1:0" },
+  { "id": 70002, "category": "WORKOUT", "start_date_local": "2026-11-03T00:00:00", "name": "Hand-made", "external_id": null },
+  { "id": 70003, "category": "NOTE", "start_date_local": "2026-11-04T00:00:00", "name": "Note" }
+]

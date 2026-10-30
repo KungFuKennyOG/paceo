@@ -33,15 +33,31 @@ export function sinkStateOf(row: PlannedWorkoutRow): SinkStateJson {
   return { ...EMPTY_SINK, ...(s ?? {}) } as SinkStateJson;
 }
 
+/**
+ * Strength sessions go to intervals.icu as WeightTraining with the exercise list as plain text.
+ * Lines must not start with "-": intervals.icu would parse them as (run) workout steps.
+ */
+export function strengthDescription(w: PlannedWorkout): string {
+  const lines = (w.exercises ?? []).map((e, i) => `${i + 1}. ${e.name}: ${e.sets} × ${e.reps} @ ${e.load}`);
+  if (lines.length === 0) return `Strength session, about ${Math.round(w.planned.minutes)} min. Details in the Paceo app.`;
+  return [`About ${Math.round(w.planned.minutes)} min. Warm up first.`, "", ...lines].join("\n");
+}
+
+/** Text sent as the event description: workout steps for runs, the exercise list for strength. */
+export function deviceTextFor(w: PlannedWorkout): string {
+  return w.sport === "strength" ? strengthDescription(w) : toIntervalsEvent(w).description;
+}
+
 export function toSinkWorkout(row: PlannedWorkoutRow, rev = row.rev): SinkWorkout {
   const w = row.workout as PlannedWorkout;
   const ev = toIntervalsEvent(w, rev);
   return {
     externalId: externalId(row.userId, row.id, rev),
     date: row.date,
+    // toIntervalsEvent maps sport "strength" to WeightTraining; the sink does the same.
     sport: w.sport,
     name: ev.name,
-    description: ev.description,
+    description: w.sport === "strength" ? strengthDescription(w) : ev.description,
   };
 }
 

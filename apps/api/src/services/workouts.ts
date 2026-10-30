@@ -1,5 +1,5 @@
 /** Workout list/detail/skip (contract WorkoutItem, WorkoutDetailResponse; spec §3.9, §11.3, §11.4). */
-import { stepsToIntervalsText, weekdayOf, type PlannedWorkout, type Units } from "@paceo/engine";
+import { weekdayOf, type PlannedWorkout, type Units } from "@paceo/engine";
 import type { ActivitySummary, CheckInResponse, WorkoutDetailResponse, WorkoutItem } from "@paceo/contracts";
 import { activitiesRepo, checkinsRepo, workoutsRepo, type ActivityRow, type PlannedWorkoutRow } from "../repo/index.js";
 import { AppError } from "../http/errors.js";
@@ -8,7 +8,7 @@ import { deriveStatus, matchActivities } from "../plan/matching.js";
 import { JOB } from "../jobs/queue.js";
 import { userTimezone } from "./connection.js";
 import { loadProfile } from "./plan.js";
-import { sinkStateOf } from "./push-workouts.js";
+import { deviceTextFor, sinkStateOf } from "./push-workouts.js";
 import type { Services } from "./context.js";
 
 export function toActivitySummary(a: ActivityRow): ActivitySummary {
@@ -81,7 +81,7 @@ export async function workoutDetail(svc: Services, userId: string, id: string): 
   let deviceText = row.deviceText;
   if (deviceText === null) {
     try {
-      deviceText = stepsToIntervalsText(w.steps);
+      deviceText = deviceTextFor(w);
     } catch {
       deviceText = null;
     }

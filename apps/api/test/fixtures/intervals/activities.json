@@ -1,0 +1,46 @@
+[
+  {
+    "id": "i9001",
+    "start_date_local": "2026-10-28T07:01:02",
+    "start_date": "2026-10-28T11:01:02Z",
+    "type": "Run",
+    "name": "Morning Run",
+    "distance": 10012.4,
+    "moving_time": 3010,
+    "elapsed_time": 3100,
+    "average_heartrate": 146,
+    "device_name": "Garmin Forerunner 965",
+    "source": "GARMIN_CONNECT",
+    "race": false
+  },
+  {
+    "id": "i9002",
+    "start_date_local": "2026-10-29T18:30:00",
+    "start_date": "2026-10-29T22:30:00Z",
+    "type": "Ride",
+    "name": "Commute",
+    "distance": 15200,
+    "moving_time": 2700,
+    "elapsed_time": 2900,
+    "average_heartrate": null,
+    "device_name": "COROS PACE 3",
+    "source": "COROS"
+  },
+  {
+    "id": "i9003",
+    "start_date_local": "2026-10-30T06:45:00",
+    "type": "Run",
+    "source": "STRAVA",
+    "_note": "STRAVA activities are not available via the API"
+  },
+  {
+    "id": "i9004",
+    "start_date_local": "2026-10-26T09:00:00",
+    "start_date": "2026-10-26T13:00:00Z",
+    "type": "WeightTraining",
+    "name": "Gym",
+    "moving_time": 2400,
+    "source": "UPLOAD",
+    "device_name": null
+  }
+]

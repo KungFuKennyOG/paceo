@@ -3,7 +3,7 @@
  * TODO(engine-replan): nightly replans call generatePlan from today; switch to replan(state, events)
  * once it lands so missed sessions, illness and pain feed the plan.
  */
-import { generatePlan, type Plan, type PlannedWorkout } from "@paceo/engine";
+import { generatePlan, HEAVY_CROSS_TRAINING_SHARE, weeklyLoad, type Plan, type PlannedWorkout } from "@paceo/engine";
 import type { PlanResponse, PlanPreviewResponse, Profile, ScreeningOutcome } from "@paceo/contracts";
 import { Profile as ProfileSchema } from "@paceo/contracts";
 import { fitnessRepo, plansRepo, profileRepo, screeningRepo, workoutsRepo, type PlanRow, type PlannedWorkoutInsert } from "../repo/index.js";
@@ -29,13 +29,23 @@ export interface BuiltPlan {
   paces: Record<string, unknown>;
 }
 
+/** Mean cross-training share of total load over the first 4 planned weeks (§6.7 C1 proxy). */
+export function plannedCrossTrainingShare(plan: Plan): number {
+  const weeks = plan.weeks.slice(0, 4);
+  if (weeks.length === 0) return 0;
+  return weeks.reduce((a, w) => a + weeklyLoad(w).crossTrainingShare, 0) / weeks.length;
+}
+
 /** Runs the engine for a profile. Pure apart from reading "today" from the clock. */
 export function buildPlan(profile: Profile, ctx: { userId: string; today: string; screening: ScreeningOutcome | null }): BuiltPlan {
   const mapped = mapProfileToPlanInput(profile, ctx);
-  const plan = generatePlan(mapped.input);
-  if (mapped.generalFitness) {
-    // TODO(engine-general-fitness): the stand-in block ends in a "race"; drop that session.
-    for (const w of plan.weeks) w.workouts = w.workouts.filter((x) => x.type !== "RACE");
+  let plan = generatePlan(mapped.input);
+  // §6.7 C1: until there is logged history, judge "heavy cross-training" from the planned weeks
+  // and re-run with 2:1 cutbacks when cross-training is above 40% of total load.
+  // TODO(history): use the last 4 logged weeks once session_log/activities feed the load model.
+  if (!mapped.input.heavyCrossTraining && plannedCrossTrainingShare(plan) > HEAVY_CROSS_TRAINING_SHARE) {
+    mapped.input = { ...mapped.input, heavyCrossTraining: true };
+    plan = generatePlan(mapped.input);
   }
   if (mapped.notes.length > 0) plan.summary.notes = [...mapped.notes, ...plan.summary.notes];
   return { mapped, plan, paces: pacesFor(mapped.input) };
