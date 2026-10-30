@@ -283,6 +283,15 @@ describe.skipIf(!TEST_DATABASE_URL)("engine follow-ups (Postgres)", () => {
     const plans = await h.database.pool.query("select reason from plans where user_id = $1 order by created_at", [b.userId]);
     expect(plans.rows).toHaveLength(plansBefore + 1);
     expect(plans.rows.at(-1)?.reason).toBe("replan_proposal");
+    // The rebuild continues the plan it replaces (engine §8 R-RACE-2): the stored plan JSON reaches
+    // replan() with its phases, so the new plan keeps the phase calendar and taper, and its stored
+    // input carries them for the next rebuild.
+    const stored = await h.database.pool.query("select input, plan from plans where user_id = $1 order by created_at", [b.userId]);
+    type Stored = { input: { continuation?: { phaseCalendar: string[]; taperWeeks: number } }; plan: { weeks: Array<{ phase: string; isTaper: boolean }> } };
+    const [prev, next] = stored.rows.slice(-2) as [Stored, Stored];
+    expect(next.plan.weeks.map((w) => w.phase)).toEqual(prev.plan.weeks.map((w) => w.phase));
+    expect(next.plan.weeks.map((w) => w.isTaper)).toEqual(prev.plan.weeks.map((w) => w.isTaper));
+    expect(next.input.continuation?.phaseCalendar).toEqual(prev.plan.weeks.map((w) => w.phase));
     expect(await status(b.userId, realign!.id)).toBe("accepted");
 
     // The next nightly doesn't bring the answered proposal back.

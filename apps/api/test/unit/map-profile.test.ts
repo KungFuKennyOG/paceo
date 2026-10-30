@@ -101,6 +101,20 @@ describe("mapProfileToPlanInput", () => {
     expect(ancient.input.vdot).toBeUndefined();
   });
 
+  it("maps run weekdays, per-day limits and HR settings (set only when known)", () => {
+    const m = mapProfileToPlanInput(
+      baseProfile({ daysAvailable: ["mon", "wed", "fri", "sat"], longRunDay: "sat", maxMinutesByDay: { mon: 45 }, hrMax: 188, hrRest: 52 }),
+      ctx,
+    );
+    expect(m.input).toMatchObject({ runWeekdays: ["mon", "wed", "fri", "sat"], runDays: 4, maxMinutesByDay: { mon: 45 }, hrMax: 188, hrMaxSource: "measured", hrRest: 52 });
+    const ageOnly = mapProfileToPlanInput(baseProfile(), ctx).input;
+    expect(ageOnly.hrMaxSource).toBe("age_formula");
+    expect("hrMax" in ageOnly).toBe(false);
+    expect("hrRest" in ageOnly).toBe(false);
+    const none = mapProfileToPlanInput(baseProfile({ birthYear: null }), ctx).input;
+    expect("hrMaxSource" in none).toBe(false);
+  });
+
   it("maps a recent time trial as tt", () => {
     const m = mapProfileToPlanInput(baseProfile({ recentResult: { distanceM: 3000, timeS: 800, date: "2026-10-20", kind: "time_trial" } }), ctx);
     expect(m.input.vdotStatus).toBe("tt");

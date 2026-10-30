@@ -2,12 +2,9 @@
  * Contract Profile → engine PlanRequest. This is the ONLY place that knows both shapes, so engine
  * changes land here.
  *
- * Still pending on the engine side, marked TODO(engine-followups) below (the engine branch adds
- * PlanInput.runWeekdays, maxMinutesByDay, hrMax, hrMaxSource and hrRest):
- * - daysAvailable (which weekdays) and maxMinutesByDay; main's engine only takes a run-day count and
- *   the long-run day.
- * - hrMax / hrMaxSource / hrRest for HR targets. (Replans already pass the profile's HRmax/HRrest
- *   through FitnessState, see replan-state.ts.)
+ * Schedule and HR settings map onto the engine's PlanInput.runWeekdays, maxMinutesByDay, hrMax,
+ * hrMaxSource and hrRest. (Replans also pass the profile's HRmax/HRrest through FitnessState, see
+ * replan-state.ts.)
  */
 import {
   computeVdot,
@@ -146,7 +143,7 @@ export function mapProfileToPlanInput(profile: Profile, ctx: MapContext): Mapped
   if (v.note) notes.push(v.note);
 
   if (!profile.daysAvailable.includes(profile.longRunDay)) {
-    notes.push("Your long-run day is not one of your available days; the long run stays on the day you picked.");
+    notes.push("Your long-run day is not one of your available days; the long run stays on the day you picked, as an extra run day.");
   }
 
   const common: Omit<PlanInput, "raceDate" | "goal"> = {
@@ -168,13 +165,21 @@ export function mapProfileToPlanInput(profile: Profile, ctx: MapContext): Mapped
     lockedEvents: lockedEvents(profile),
     strength: strengthConfig(profile),
     conservative,
-    // TODO(engine-followups): runWeekdays: profile.daysAvailable,
-    // TODO(engine-followups): maxMinutesByDay: profile.maxMinutesByDay (only days with a cap; {} = none),
+    // Runs only on the available days (the engine adds the long-run day if it isn't one of them).
+    runWeekdays: profile.daysAvailable,
+    // §7.1 step 4: only days with a cap; {} = none.
+    maxMinutesByDay: profile.maxMinutesByDay,
   };
-  // TODO(engine-followups): HR settings, once PlanInput has them (exactOptionalPropertyTypes: set only when known):
-  //   if (profile.hrMax !== null) { common.hrMax = profile.hrMax; common.hrMaxSource = "measured"; }
-  //   else if (profile.birthYear !== null) common.hrMaxSource = "age_formula";
-  //   if (profile.hrRest !== null) common.hrRest = profile.hrRest;
+  // HR settings (exactOptionalPropertyTypes: set only when known). A profile HRmax counts as measured
+  // (replan-state.ts makes the same call); without one, the engine uses Tanaka from the age, and
+  // beginners then get no HR cap (§6.9 needs a measured HRmax).
+  if (profile.hrMax !== null) {
+    common.hrMax = profile.hrMax;
+    common.hrMaxSource = "measured";
+  } else if (profile.birthYear !== null) {
+    common.hrMaxSource = "age_formula";
+  }
+  if (profile.hrRest !== null) common.hrRest = profile.hrRest;
   if (v.value !== null) common.vdot = v.value;
   if (v.anchorM !== undefined && v.value !== null) common.vdotAnchorM = v.anchorM;
   if (profile.birthYear !== null) common.age = Number(ctx.today.slice(0, 4)) - profile.birthYear;
