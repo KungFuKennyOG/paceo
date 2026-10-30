@@ -43,4 +43,13 @@ jobs:
     needs: test
     steps:
       - uses: actions/checkout@v4
-      - run: bash deploy/smoke-test.sh
+      - name: Smoke test
+        run: |
+          set -o pipefail
+          bash deploy/smoke-test.sh 2>&1 | tee smoke.log
+      - name: Report failure as annotation
+        if: failure()
+        run: |
+          # Surface the tail of the log as one annotation (readable even where raw logs are not).
+          msg=$(tail -60 smoke.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=docker smoke test::${msg}"
