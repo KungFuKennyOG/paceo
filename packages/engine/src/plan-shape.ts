@@ -3,8 +3,8 @@
  * so the reachability check simulates exactly the cutbacks and caps the generator will use.
  * Pure function of (input, number of weeks); no dates.
  */
-import type { GeneralFitnessGoal, GoalDistance, Level, Phase, PlanInput } from "./plan-types.js";
-import { planPhases, type PlanPhases } from "./phases.js";
+import type { GeneralFitnessGoal, GoalDistance, Level, Phase, PlanContinuation, PlanInput } from "./plan-types.js";
+import { continuedPhases, planPhases, type PlanPhases } from "./phases.js";
 import { taperMultipliers, taperWeeks as taperLength } from "./taper.js";
 import {
   buildWeekTargets,
@@ -113,35 +113,54 @@ export function ladderKm(stage: number, paces: PaceSet): number {
 }
 
 /**
+ * The input's continuation (§8 R-RACE-2) when it applies to a plan of `weeks` weeks: its calendar
+ * must reach back to week 1 and its taper must be a §6.8 length. Otherwise the plan is built fresh.
+ */
+export function activeContinuation(input: PlanInput, weeks: number): PlanContinuation | undefined {
+  const c = input.continuation;
+  if (!c || weeks < 1 || c.phaseCalendar.length < weeks) return undefined;
+  if (!Number.isInteger(c.taperWeeks) || c.taperWeeks < 1 || c.taperWeeks > 3) return undefined;
+  return c;
+}
+
+/**
  * Shape a plan of `weeks` weeks. Two passes for the marathon taper: T1 says 2 weeks when the peak
- * is under 50 km/week, and the peak depends on how many build weeks remain.
+ * is under 50 km/week, and the peak depends on how many build weeks remain. A continuation keeps
+ * the original taper instead (R-RACE-1), so T1 isn't re-run.
  */
 export function planShape(input: PlanInput, weeks: number): PlanShape {
+  const cont = activeContinuation(input, weeks);
+  if (cont) return shapeWithTaper(input, weeks, cont.taperWeeks, cont);
   const first = shapeWithTaper(input, weeks, taperLength(input.goal.distance, input.level, Infinity));
   const taper = taperLength(input.goal.distance, input.level, first.buildPeakKm);
   return taper === first.taperWeeks ? first : shapeWithTaper(input, weeks, taper);
 }
 
-function shapeWithTaper(input: PlanInput, weeks: number, taperRequested: number): PlanShape {
+function shapeWithTaper(input: PlanInput, weeks: number, taperRequested: number, cont?: PlanContinuation): PlanShape {
   const trace: string[] = [];
   const distance: GoalDistance = input.goal.distance;
   const paces = planPaces(input);
   const entry = input.ladderEntryStage ?? 1;
   const ladderWanted = input.level === "beginner" ? ladderWeeksNeeded(input.canRun20MinContinuous, entry) : 0;
-  const taperWeeks = Math.max(1, Math.min(taperRequested, weeks - 1));
+  // A continuation may start inside the taper: then every week left is taper (R-RACE-1).
+  const taperWeeks = cont ? Math.min(taperRequested, weeks) : Math.max(1, Math.min(taperRequested, weeks - 1));
   const ladderWeeks = Math.max(0, Math.min(ladderWanted, weeks - taperWeeks - 1));
   if (ladderWeeks < ladderWanted) {
     trace.push(`§6.9: only ${ladderWeeks} of ${ladderWanted} ladder weeks fit; graduation (stage ${LADDER_GRADUATION_STAGE}) isn't reached before the race`);
   }
   const ladderStages = Array.from({ length: ladderWeeks }, (_, i) => Math.min(LADDER_GRADUATION_STAGE, entry + i));
   const buildCount = Math.max(0, weeks - taperWeeks - ladderWeeks);
-  const phases = planPhases(Math.max(1, weeks), input.level, ladderWeeks);
+  const phases = cont
+    ? continuedPhases(cont.phaseCalendar, weeks, taperWeeks, input.level, ladderWeeks, cont)
+    : planPhases(Math.max(1, weeks), input.level, ladderWeeks);
   const cutback = cutbackPolicy(input);
+  if (cont) trace.push(...continuationTrace(cont, weeks, phases));
 
   const ttWeek = ttWeekFor(input, weeks, ladderWeeks, taperWeeks);
   const ttBuildIdx = new Set(ttWeek !== undefined ? [ttWeek - 1 - ladderWeeks] : []);
   const buildPhases: Phase[] = phases.byWeek.slice(ladderWeeks, ladderWeeks + buildCount);
-  const buildKinds = layoutBuildWeeks(buildCount, cutback.every, buildPhases, ttBuildIdx);
+  // A continued plan keeps the cutback rhythm it had (a break resets it: the break was the rest).
+  const buildKinds = layoutBuildWeeks(buildCount, cutback.every, buildPhases, ttBuildIdx, ladderWeeks === 0 ? (cont?.weeksSinceCutback ?? 0) : 0);
 
   // V3 "week 1 starts at current volume". After a ladder the build resumes from the higher of the
   // entry volume and the last ladder week, never below what the runner already does (no detraining).
@@ -164,7 +183,9 @@ function shapeWithTaper(input: PlanInput, weeks: number, taperRequested: number)
   if (peakCapKm < v3Peak) trace.push(`V3:template_capacity(${capacityKm.toFixed(1)}km)`);
   const buildTargets = buildWeekTargets(startKm, peakCapKm, buildKinds, CUTBACK_FLOOR_OF_ENTRY * startKm);
   const buildPeakKm = Math.max(startKm, ...buildTargets);
-  const mult = taperMultipliers(taperWeeks);
+  // Inside the taper, the weeks left take the tail of its T2 multipliers (weeks out stay the same).
+  const fullTaper = cont ? taperRequested : taperWeeks;
+  const mult = taperMultipliers(fullTaper).slice(fullTaper - taperWeeks);
 
   const kinds: WeekKind[] = [
     ...Array<WeekKind>(ladderWeeks).fill("ladder"),
@@ -266,6 +287,17 @@ export function generalFitnessShape(input: PlanInput, weeks: number, goal: Gener
   if (ttIdx >= 0) shape.ttWeek = ladderWeeks + ttIdx + 1;
   if (startCap !== undefined) shape.startCap = startCap;
   return shape;
+}
+
+/** Summary notes for a continued plan (R-RACE-2, D). */
+function continuationTrace(cont: PlanContinuation, weeks: number, phases: PlanPhases): string[] {
+  const from = cont.phaseCalendar.length - weeks + 1;
+  const out = [`R-RACE-2:continue(wk${from}/${cont.phaseCalendar.length},${phases.byWeek[0] ?? "-"},taper${cont.taperWeeks})`];
+  if (cont.restart) out.push("R-RACE-2:restart");
+  else if (phases.rebuildWeeks) out.push(`R-RACE-2:rebuild_weeks(${phases.rebuildWeeks})`);
+  else if (cont.phaseReset) out.push("R-RACE-2:phase_reset");
+  if (cont.reason) out.push(`R-RACE-2:reason(${cont.reason})`);
+  return out;
 }
 
 function splitOf(byWeek: readonly Phase[]): PlanPhases["split"] {

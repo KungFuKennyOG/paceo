@@ -13,7 +13,7 @@ import type {
 } from "./plan-types.js";
 import { GOAL_DISTANCE_M } from "./plan-types.js";
 import { addDays, planCalendar } from "./dates.js";
-import { planShape, type PlanShape } from "./plan-shape.js";
+import { activeContinuation, planShape, type PlanShape } from "./plan-shape.js";
 import { V1_FACTOR } from "./v1.js";
 import { computeVdot, defaultFadeExponent, fadedRaceTimeS, raceTimeS, VdotRangeError } from "./vdot.js";
 import { AGGRESSIVE_GOAL_VDOT_DELTA } from "./paces.js";
@@ -101,16 +101,31 @@ interface CoreResult {
   weeks: number;
 }
 
-/** Calendar, level, entry and reachability checks for one (distance, date) pair. */
+/**
+ * Calendar, level, entry and reachability checks for one (distance, date) pair.
+ * A continued plan (§8 R-RACE-2, a mid-plan rebuild) is not a new plan: the §6.2 minimum weeks,
+ * entry and months-running checks were passed when it started, so only the R-RACE checks run here:
+ * level, and reachability of the long-run target over the weeks left (R-RACE-2 / 3b) (D).
+ */
 function coreChecks(input: PlanInput): CoreResult {
   const reasons: FeasibilityReason[] = [];
   const d = input.goal.distance;
   const e = ENTRY[d];
   const cal = planCalendar(input.today, input.raceDate, input.longRunDay);
   const need = minWeeks(input);
+  const continued = activeContinuation(input, cal.weeks) !== undefined;
 
   if (levelBlocked(input.level, d)) {
     reasons.push({ code: "level_blocked", status: "block", message: `Beginners can't train for a ${d} yet; build up with a 5K or 10K first.` });
+  }
+  if (continued) {
+    const c = input.continuation!;
+    reasons.push({
+      code: "continuation",
+      status: "info",
+      message: `Mid-plan rebuild: ${cal.weeks} week(s) left of a ${c.phaseCalendar.length}-week plan, phases and the ${c.taperWeeks}-week taper kept; new-plan minimums don't apply (§8 R-RACE).`,
+    });
+    return { reasons, reach: reachReasons(input, cal.weeks, reasons), weeks: cal.weeks };
   }
   if (cal.weeks < need) {
     reasons.push({ code: "min_weeks", status: "block", message: `${d} needs at least ${need} weeks for this level; ${cal.weeks} are available.` });
@@ -131,17 +146,22 @@ function coreChecks(input: PlanInput): CoreResult {
     reasons.push({ code: "beginner_10k", status: "info", message: "Consider a 5K first." });
   }
 
-  let reach: Feasibility["reach"] = { peakLongRunKm: input.longestRun30d.km, l1TargetKm: 0, ratio: 0 };
-  if (cal.weeks >= 2 && !levelBlocked(input.level, d)) {
-    reach = reachability(planShape(input, cal.weeks), input.longestRun30d.km);
-    const pct = Math.round(reach.ratio * 100);
-    if (reach.ratio < REACH_BLOCK) {
-      reasons.push({ code: "reachability", status: "block", message: `Long runs can only reach ${pct}% of this plan's target (${reach.l1TargetKm.toFixed(1)} km).` });
-    } else if (reach.ratio < REACH_WARN) {
-      reasons.push({ code: "reachability", status: "warn", message: `Long runs reach ${pct}% of this plan's target (${reach.l1TargetKm.toFixed(1)} km).` });
-    }
+  return { reasons, reach: reachReasons(input, cal.weeks, reasons), weeks: cal.weeks };
+}
+
+/** R-RACE-2 reachability (§6.2): warn below 85% of the plan's own L1 target, block below 70%. */
+function reachReasons(input: PlanInput, weeks: number, reasons: FeasibilityReason[]): Feasibility["reach"] {
+  if (weeks < 2 || levelBlocked(input.level, input.goal.distance)) {
+    return { peakLongRunKm: input.longestRun30d.km, l1TargetKm: 0, ratio: 0 };
   }
-  return { reasons, reach, weeks: cal.weeks };
+  const reach = reachability(planShape(input, weeks), input.longestRun30d.km);
+  const pct = Math.round(reach.ratio * 100);
+  if (reach.ratio < REACH_BLOCK) {
+    reasons.push({ code: "reachability", status: "block", message: `Long runs can only reach ${pct}% of this plan's target (${reach.l1TargetKm.toFixed(1)} km).` });
+  } else if (reach.ratio < REACH_WARN) {
+    reasons.push({ code: "reachability", status: "warn", message: `Long runs reach ${pct}% of this plan's target (${reach.l1TargetKm.toFixed(1)} km).` });
+  }
+  return reach;
 }
 
 // ── goal time (§6.2 goal-time checks, PACE-FADE §4.4) ────────────────────────────────────────────
@@ -166,7 +186,8 @@ export function goalVdotDelta(input: PlanInput): number | undefined {
   return goalVdot - current;
 }
 
-function goalTimeChecks(input: PlanInput, weeks: number): { reasons: FeasibilityReason[]; delta?: number } {
+/** §6.2 goal-time checks. `newBlock` = a new plan; a continued plan skips the short-block check (its block started earlier). */
+function goalTimeChecks(input: PlanInput, weeks: number, newBlock = true): { reasons: FeasibilityReason[]; delta?: number } {
   const reasons: FeasibilityReason[] = [];
   if (input.goal.timeS === undefined) return { reasons };
   if (input.vdot === undefined || input.vdotStatus === "none") {
@@ -189,7 +210,7 @@ function goalTimeChecks(input: PlanInput, weeks: number): { reasons: Feasibility
   } else if (delta > REALISTIC_GOAL_VDOT_GAIN) {
     reasons.push({ code: "goal_edge", status: "info", message: `Goal needs +${delta.toFixed(2)} VDOT, at the edge of the +${AGGRESSIVE_GOAL_VDOT_DELTA} flag.` });
   }
-  if (weeks < 12 && delta > REALISTIC_GOAL_VDOT_GAIN) {
+  if (newBlock && weeks < 12 && delta > REALISTIC_GOAL_VDOT_GAIN) {
     reasons.push({ code: "goal_short_block", status: "warn", message: `Under 12 weeks, a gain of +${delta.toFixed(2)} VDOT is unlikely.` });
   }
   if ((input.level === "beginner" || input.level === "novice") && input.vdotStatus === "estimated") {
@@ -269,13 +290,17 @@ function worst(reasons: readonly FeasibilityReason[]): FeasibilityStatus {
 
 export function checkFeasibility(input: PlanInput): Feasibility {
   const core = coreChecks(input);
-  const goal = goalTimeChecks(input, core.weeks);
+  const continued = core.reasons.some((r) => r.code === "continuation");
+  const goal = goalTimeChecks(input, core.weeks, !continued);
   const reasons = [...core.reasons, ...goal.reasons];
   const status = worst(reasons);
+  // Alternatives are "what if" new plans (another date, distance or base block), so they are
+  // checked without the continuation.
+  const { continuation: _c, ...fresh } = input;
   const result: Feasibility = {
     status,
     reasons,
-    alternatives: status === "ok" ? [] : alternatives(input, reasons, core.weeks),
+    alternatives: status === "ok" ? [] : alternatives(continued ? fresh : input, reasons, core.weeks),
     reach: core.reach,
   };
   if (goal.delta !== undefined) result.goalVdotDelta = goal.delta;

@@ -5,6 +5,7 @@ import {
   generatePlan,
   isGeneralFitness,
   planPaces,
+  REACH_WARN,
   replan,
   toDayNumber,
   type Activity,
@@ -28,6 +29,8 @@ import {
   expectSchedule,
   expectStrengthRules,
   expectTargetTracking,
+  expectV1,
+  expectWeeklyGrowth,
   isQuality,
 } from "./plan-checks.js";
 import { activityFor, preHistory, ranAsPlanned, stateOf, workoutsBefore } from "./replan-fixtures.js";
@@ -88,7 +91,8 @@ function expectReplanInvariants(r: ReplanResult, before: Plan, input: PlanInput,
   expectGrowth(r);
   for (const wk of r.plan.weeks) {
     const km = wk.workouts.filter((w) => w.sport === "run" && w.type !== "RACE").reduce((a, w) => a + w.planned.run_m / 1000, 0);
-    expect(wk.plannedKm, `week ${wk.index}: strength never counts as running km`).toBeCloseTo(km, 1);
+    // plannedKm is rounded to 0.1 km, so it can sit exactly 0.05 km from the raw sum.
+    expect(Math.abs(wk.plannedKm - km), `week ${wk.index}: strength never counts as running km`).toBeLessThanOrEqual(0.05 + 1e-9);
   }
 }
 
@@ -140,6 +144,10 @@ describe("R-MISS-4: more than 3 missed in 2 weeks → realignment prompt, then r
     const runKm = acts.filter((a) => a.sport === "run" && a.date >= "2026-11-20" && a.date < "2026-12-11").reduce((s, a) => s + a.distanceM / 1000, 0);
     expect(r2.derivedInput!.currentWeeklyKm).toBeCloseTo(runKm / 3, 0);
     expect(r2.proposals.filter((p) => p.kind === "realign")).toHaveLength(0);
+    // Realignment continues the plan (§8 R-RACE-2): same phases and taper, progression carried over.
+    expect(r2.plan.weeks.map((w) => w.phase)).toEqual(planC.weeks.map((w) => w.phase));
+    expect(r2.plan.weeks.map((w) => w.isTaper)).toEqual(planC.weeks.map((w) => w.isTaper));
+    expect((r2.derivedInput as PlanInput).continuation).toMatchObject({ taperWeeks: 2 });
     expectReplanInvariants(r2, planC, personaC, acts);
   });
 });
@@ -205,8 +213,149 @@ describe("R-BREAK: 30 days off (persona B) → rebuild + re-test", () => {
     if (goal?.kind === "goal_change") expect(goal.suggestedGoalS!).toBeGreaterThan(personaB.goal.timeS!);
   });
 
+  it("continues the calendar: one Foundation rebuild week, then the original TQ/FQ weeks; the taper is unchanged", () => {
+    const d = r.derivedInput as PlanInput;
+    expect(d.continuation).toMatchObject({ rebuildWeeks: 1, phaseReset: true, taperWeeks: 3 });
+    expect(r.plan.weeks.map((w) => w.phase)).toEqual([...planB.weeks.slice(0, 8).map((w) => w.phase), "FI", ...planB.weeks.slice(9).map((w) => w.phase)]);
+    expect(r.plan.weeks.map((w) => w.isTaper)).toEqual(planB.weeks.map((w) => w.isTaper));
+    for (const w of between(r.plan, "2026-12-31", "2027-01-04")) expect(w.rule_trace).toContain("R-RACE-2:rebuild_week");
+    expect(r.plan.feasibility.status).not.toBe("block");
+  });
+
   it("satisfies the plan invariants", () => expectReplanInvariants(r, planB, personaB, acts));
 });
+
+/** Every plan invariant (plan-checks.ts) on the plan generatePlan builds from a rebuild's derived input. */
+function expectRebuiltPlanInvariants(d: PlanInput): void {
+  const p = generatePlan(d);
+  expect(p.weeks.length).toBeGreaterThan(0);
+  expectBasics(p, d);
+  expectSchedule(p);
+  expectKeyBudget(p);
+  expectV1(p, d);
+  expectWeeklyGrowth(p);
+  expectLongRunIsLongest(p);
+  expectTargetTracking(p);
+  expectDanielsCaps(p);
+  expectCrossTrainingRules(p);
+  expectStrengthRules(p);
+  expectLockedEventsListed(p, d);
+}
+
+describe("§8 R-RACE-2: a rebuild continues the phases (persona B, 10 days off mid-TQ)", () => {
+  // Ran weeks 1–9 as planned (week 9 = first TQ week), then 10 days off; back on Thursday of week 11.
+  const acts = [...preHistory(personaB), ...ranAsPlanned(planB, personaB.today, "2027-01-04")];
+  const state = stateOf(personaB, acts, planB);
+  const r = replan(state, [], "2027-01-14");
+  const d = r.derivedInput as PlanInput;
+
+  it("stays in TQ / FQ: every remaining week keeps its original phase, and the taper is unchanged", () => {
+    expect(r.regenerated).toBe(true);
+    expect(d.today).toBe("2027-01-11");
+    expect(d.continuation).toMatchObject({ taperWeeks: 3, weeksSinceCutback: 0 });
+    expect(d.continuation!.phaseReset).toBeUndefined();
+    expect(r.plan.weeks.map((w) => w.phase)).toEqual(planB.weeks.map((w) => w.phase));
+    expect(r.plan.weeks.slice(10).map((w) => w.phase)).toEqual(["TQ", "TQ", "TQ", "TQ", "FQ", "FQ", "FQ", "FQ"]);
+    expect(r.plan.weeks.map((w) => w.isTaper)).toEqual(planB.weeks.map((w) => w.isTaper));
+    expect(r.plan.summary.taperWeeks).toBe(3);
+    expect(r.plan.summary.notes.some((n) => n.startsWith("R-RACE-2:continue(wk11/18,TQ,taper3)"))).toBe(true);
+    // After the all-easy 50% days, quality comes back as TQ work (I or T, §6.3 P3), not Foundation running.
+    const q = between(r.plan, "2027-01-19", "2027-02-08").filter(isQuality);
+    expect(q.length).toBeGreaterThan(0);
+    for (const w of q) expect(w.rule_trace.some((t) => t.startsWith("P3:TQ:M:"))).toBe(true);
+  });
+
+  it("runs the R-RACE checks instead of the new-plan minimum: not blocked, long-run target reachable", () => {
+    const codes = r.plan.feasibility.reasons.map((x) => x.code);
+    expect(r.plan.feasibility.status).not.toBe("block");
+    expect(codes).toContain("continuation");
+    expect(codes).not.toContain("min_weeks");
+    expect(codes).not.toContain("goal_short_block");
+    expect(r.plan.feasibility.reach.ratio).toBeGreaterThanOrEqual(REACH_WARN);
+    expect(r.trace).toContain("R-RACE:ok");
+    expect(r.proposals.filter((p) => p.kind === "goal_change")).toHaveLength(0);
+  });
+
+  it("recomputes volume and sessions from actual history: the return ramp first, progression carried over", () => {
+    expect(d.currentWeeklyKm).toBeGreaterThan(40);
+    expect(between(r.plan, "2027-01-14", "2027-01-19").every((w) => !isQuality(w))).toBe(true);
+    // Progression steps back one exposure per 7 days off: 2 T, 1 I and 2 R sessions done, less 2.
+    expect(d.continuation!.exposures).toBeUndefined();
+  });
+
+  it("satisfies the replan invariants", () => expectReplanInvariants(r, planB, personaB, acts));
+  it("the rebuilt plan on its own satisfies every plan invariant", () => expectRebuiltPlanInvariants(d));
+
+  it("is deterministic and idempotent", () => {
+    expect(JSON.stringify(replan(state, [], "2027-01-14"))).toBe(JSON.stringify(r));
+    expect(JSON.stringify(generatePlan(d))).toBe(JSON.stringify(generatePlan(JSON.parse(JSON.stringify(d)) as PlanInput)));
+    const again = replan({ ...state, plan: r.plan, fitness: r.fitness }, [], "2027-01-14");
+    expect(again.regenerated).toBe(false);
+    expect(JSON.stringify(again.plan)).toBe(JSON.stringify(r.plan));
+  });
+});
+
+describe("§8 R-BREAK > 28 days early in the plan: restart FI with a re-test (persona B, 30 days off from week 2)", () => {
+  const acts = [...preHistory(personaB), ...ranAsPlanned(planB, personaB.today, "2026-11-09")];
+  const r = replan(stateOf(personaB, acts, planB), [], "2026-12-09");
+  const d = r.derivedInput as PlanInput;
+
+  it("13 weeks left meets the new-plan minimum, so the build restarts from FI; the taper stays", () => {
+    expect(r.regenerated).toBe(true);
+    expect(d.continuation).toMatchObject({ restart: true, taperWeeks: 3 });
+    const rebuilt = r.plan.weeks.slice(5);
+    expect(rebuilt[0]!.phase).toBe("FI");
+    expect(rebuilt.map((w) => w.phase)).toEqual([...planPhasesFor(13), "FQ", "FQ", "FQ"].slice(0, 13));
+    expect(r.plan.weeks.map((w) => w.isTaper)).toEqual(planB.weeks.map((w) => w.isTaper));
+    expect(r.plan.feasibility.status).not.toBe("block");
+  });
+
+  it("re-tests: VDOT detrained and estimated, a time trial in the next week, a goal revision offered", () => {
+    expect(r.fitness.status).toBe("estimated");
+    const tt = runsOf(r.plan).filter((w) => w.type === "TT" && w.date >= "2026-12-09");
+    expect(tt).toHaveLength(1);
+    expect(tt[0]!.date < "2026-12-21").toBe(true);
+    expect(r.proposals.some((p) => p.kind === "goal_change")).toBe(true);
+  });
+
+  it("satisfies the replan invariants", () => expectReplanInvariants(r, planB, personaB, acts));
+  it("the rebuilt plan on its own satisfies every plan invariant", () => expectRebuiltPlanInvariants(d));
+  it("is deterministic", () => expect(JSON.stringify(replan(stateOf(personaB, acts, planB), [], "2026-12-09"))).toBe(JSON.stringify(r)));
+});
+
+describe("PlanInput.continuation in generatePlan (§8 R-RACE-2)", () => {
+  const cal = planB.weeks.map((w) => w.phase);
+  const base: PlanInput = { ...personaB, today: "2027-01-11", continuation: { phaseCalendar: cal, taperWeeks: 3 } };
+  const firstT = (p: Plan) => runsOf(p).find((w) => w.type === "T")!;
+
+  it("continues progression from the exposures already done", () => {
+    const fresh = generatePlan(base);
+    const carried = generatePlan({ ...base, continuation: { ...base.continuation!, exposures: { T: 6 } } });
+    expect(fresh.weeks.map((w) => w.phase)).toEqual(cal.slice(10));
+    expect(carried.weeks.map((w) => w.phase)).toEqual(cal.slice(10));
+    expect(firstT(carried).planned.minutes).toBeGreaterThan(firstT(fresh).planned.minutes);
+  });
+
+  it("keeps the taper even when it is all that's left", () => {
+    const input: PlanInput = { ...base, today: "2027-02-22", continuation: { phaseCalendar: cal, taperWeeks: 3 } };
+    const p = generatePlan(input);
+    expect(p.weeks.map((w) => [w.phase, w.isTaper])).toEqual([["FQ", true], ["FQ", true]]);
+    expectRebuiltPlanInvariants(input);
+    expect(p.summary.taperWeeks).toBe(2);
+    expect(p.feasibility.status).not.toBe("block");
+  });
+
+  it("is ignored when its calendar doesn't reach back to today's week: a new plan, with the new-plan minimum", () => {
+    const p = generatePlan({ ...base, continuation: { phaseCalendar: cal.slice(0, 5), taperWeeks: 3 } });
+    expect(p.feasibility.reasons.map((r) => r.code)).toContain("min_weeks");
+    expect(p.weeks[0]!.phase).toBe("FI");
+  });
+});
+
+/** §6.3 phases of a fresh `weeks`-week intermediate plan (build part first). */
+function planPhasesFor(weeks: number): string[] {
+  return generatePlan({ ...personaB, raceDate: addDays(personaB.today, 7 * weeks - 1) }).weeks.map((w) => w.phase).slice(0, weeks - 3);
+}
 
 // ── R-ILL ────────────────────────────────────────────────────────────────────────────────────────
 

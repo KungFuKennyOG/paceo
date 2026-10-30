@@ -57,6 +57,7 @@ const RULE_NAME: Record<string, string> = {
   "R-LOAD-4": "your cross-training share",
   "R-RACE": "your race date",
   "R-RACE-1": "your race date",
+  "R-RACE-2": "your race date",
   "R-RACE-3": "your race date",
   "R-RACE-4": "your race date",
   "R-PERF": "your recent session paces",
@@ -295,6 +296,15 @@ const TEMPLATES: Record<string, Tpl> = {
   "R-LOAD-4": () => "Lighter weeks come every third week because cross-training is a big share of your load.",
   "R-RACE": () => "Checked against your race date.",
   "R-RACE-1": () => "Your taper is kept in full; the build is shortened instead.",
+  "R-RACE-2": (r) => {
+    const s = r.join(":");
+    if (s === "rebuild_week") return "A rebuild week of easy running after your long break, before the plan picks up its phases again.";
+    if (s === "restart") return "After a long break the build starts again from the Foundation phase; the taper and race date stay.";
+    if (s === "phase_reset") return "After your break, the current training phase starts over.";
+    if (s.startsWith("rebuild_weeks(")) return `After a long break, ${args(s)[0] ?? "1"} easy rebuild week(s) come first; the taper and race date stay.`;
+    if (s.startsWith("continue(")) return "Rebuilt from your actual training, continuing your plan's phases and taper.";
+    return "Rebuilt around your race date, keeping your plan's phases and taper.";
+  },
   "R-RACE-4": () => "Few build weeks are left before your race.",
   "R-PERF": (r) => `Recent quality sessions: ${r[0]?.replace(/\(.*$/, "") ?? "checked"}.`,
   "FIT-UPDATE": (r) => {

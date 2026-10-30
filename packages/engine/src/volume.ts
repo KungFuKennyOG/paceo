@@ -115,16 +115,18 @@ export const MIN_BUILD_WEEKS_BETWEEN_CUTBACKS = 2;
  *    week early, provided at least 2 build weeks precede it (so 3:1 can align; 2:1 already fits).
  *  - C2: no cutback in the last build week (the week right before the taper). It moves one week
  *    earlier under the same 2-build-week condition, otherwise it is dropped (the taper follows).
- * `phases[i]` and `ttWeeks` are indexed like the build weeks.
+ * `phases[i]` and `ttWeeks` are indexed like the build weeks. `sinceStart` carries the rhythm of a
+ * plan being continued (§8 R-RACE-2): build weeks since its last cutback.
  */
 export function layoutBuildWeeks(
   count: number,
   every: number,
   phases: readonly Phase[],
   ttWeeks: ReadonlySet<number> = new Set(),
+  sinceStart = 0,
 ): BuildWeekKind[] {
   const kinds: BuildWeekKind[] = [];
-  let since = 0; // build weeks since the last cutback / TT
+  let since = Math.max(0, sinceStart); // build weeks since the last cutback / TT
   for (let i = 0; i < count; i++) {
     const phaseEnds = i + 1 < count && phases[i + 1] !== phases[i];
     const due = since >= every - 1;

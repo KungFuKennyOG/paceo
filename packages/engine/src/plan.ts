@@ -15,6 +15,7 @@
  */
 import type { PlannedWorkout } from "./workout.js";
 import type {
+  ExposureFamily,
   Feasibility,
   GeneralFitnessInput,
   Phase,
@@ -32,6 +33,7 @@ import { planCalendar, fromDayNumber, toDayNumber, weekdayOf, type PlanCalendar 
 import { formatDuration } from "./units.js";
 import { checkFeasibility, levelBlocked, predictedGoalTimeS } from "./feasibility.js";
 import {
+  activeContinuation,
   easyMaxKm,
   effectiveRunDays,
   generalFitnessShape,
@@ -202,13 +204,16 @@ function generateGeneralFitness(gf: GeneralFitnessInput): Plan {
 }
 
 function runPlan(env: Env, feasibility: Feasibility, input: PlanInput): Plan {
+  // A continued plan (§8 R-RACE-2) keeps growing sessions from the exposures already run, and its
+  // taper / pre-taper long runs are relative to the longest run actually done (D).
+  const cont = env.mode === "race" ? activeContinuation(env.input, env.cal.weeks) : undefined;
   const st: State = {
     history: [],
     keyDays: [],
-    exposures: new Map(),
+    exposures: new Map(Object.entries(cont?.exposures ?? {}).map(([k, n]) => [k, Math.max(0, Math.round(n ?? 0))])),
     lrEligibleWeeks: 0,
     lrLevelKm: input.longestRun30d.km,
-    peakLrKm: 0,
+    peakLrKm: cont ? input.longestRun30d.km : 0,
     prevPlannedKm: 0,
   };
   const runWeeks: PlanWeek[] = [];
@@ -313,12 +318,15 @@ function crossTrainingKeyCost(env: Env, startDay: number): number {
 // ── one week ─────────────────────────────────────────────────────────────────────────────────────
 
 function weekInfo(env: Env, w: number): WeekInfo {
-  const byWeek = env.shape.phases.byWeek;
-  const phase = byWeek[w - 1] as Phase;
+  // A continued plan counts the phase from where it started in the original calendar (R-RACE-2).
+  const before = env.shape.phases.before ?? [];
+  const byWeek = [...before, ...env.shape.phases.byWeek];
+  const at = before.length + w - 1;
+  const phase = byWeek[at] as Phase;
   // Index/length within the contiguous run of this phase (general-fitness phases repeat, D).
-  let first = w - 1;
+  let first = at;
   while (first > 0 && byWeek[first - 1] === phase) first--;
-  let last = w - 1;
+  let last = at;
   while (last + 1 < byWeek.length && byWeek[last + 1] === phase) last++;
   const startDay = env.cal.startDay + 7 * (w - 1);
   const race = env.mode === "race";
@@ -330,7 +338,7 @@ function weekInfo(env: Env, w: number): WeekInfo {
     startDay,
     weeksOut: race ? env.cal.weeks - w + 1 : Infinity,
     isRace: race && w === env.cal.weeks,
-    phaseIdx: w - 1 - first,
+    phaseIdx: at - first,
     phaseLen: last - first + 1,
     budget: keyBudget(crossTrainingKeyCost(env, startDay)),
     caps: new Set(),
@@ -343,9 +351,13 @@ function planWeek(env: Env, st: State, w: number): PlanWeek {
   const placed = info.kind === "ladder" ? ladderWeek(env, st, info, notes) : runWeek(env, st, info, notes);
   placed.sort((a, b) => a.offset - b.offset);
 
+  // R-BREAK > 28 d: Foundation rebuild weeks at the front of a continued plan (R-RACE-2, D).
+  const rebuild = w <= (env.shape.phases.rebuildWeeks ?? 0);
+  if (rebuild) notes.push("R-RACE-2:rebuild_week");
   const workouts: PlannedWorkout[] = placed.map(({ offset, draft }) => {
     const date = fromDayNumber(info.startDay + offset);
-    return { id: `${env.userId}-w${String(w).padStart(2, "0")}-${date}`, user_id: env.userId, date, ...draft };
+    const d = rebuild ? withTrace(draft, "R-RACE-2:rebuild_week") : draft;
+    return { id: `${env.userId}-w${String(w).padStart(2, "0")}-${date}`, user_id: env.userId, date, ...d };
   });
   for (const [i, wk] of workouts.entries()) {
     const day = info.startDay + (placed[i] as Placed).offset;
@@ -644,6 +656,29 @@ function exposureKey(env: Env, kind: QualityKind | "TT" | "LR_M"): string {
   if (kind === "LR_M" || kind === "M") return "M";
   if (kind === "GP" && env.input.goal.distance === "marathon") return "M";
   return kind;
+}
+
+/**
+ * The progression family (exposureKey) a planned workout counted toward, read from its type and
+ * trace; undefined for sessions that don't progress (easy, easy LR, race, run/walk). Used to carry
+ * progression into a continued plan (§8 R-RACE-2).
+ */
+export function exposureFamilyOf(w: Pick<PlannedWorkout, "type" | "rule_trace">): ExposureFamily | undefined {
+  switch (w.type) {
+    case "L":
+      return w.rule_trace.includes("L3:m_segment") ? "M" : undefined;
+    case "M":
+      // Non-marathon goal-pace sessions are typed M with a W-GP trace; marathon GP is an M session.
+      return w.rule_trace.some((t) => t.startsWith("W-GP:")) ? "GP" : "M";
+    case "T":
+    case "I":
+    case "R":
+    case "H":
+    case "TT":
+      return w.type;
+    default:
+      return undefined;
+  }
 }
 
 function nextExposure(env: Env, st: State, kind: QualityKind | "TT" | "LR_M"): number {

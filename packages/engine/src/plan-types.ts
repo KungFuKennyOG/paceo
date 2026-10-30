@@ -122,10 +122,53 @@ export interface PlanInput {
    * serious injury or surgery): no plyometrics and no heavy strength work.
    */
   conservative?: boolean;
+  /**
+   * Mid-plan rebuild (§8 R-RACE-2): continue an existing race plan's phase structure from the week
+   * holding `today` instead of re-deriving Daniels phases for the weeks left. Set by replan();
+   * ignored in general-fitness mode and when the calendar doesn't reach back to `today`'s week.
+   */
+  continuation?: PlanContinuation;
+}
+
+/** Progression families for quality sessions (all marathon-pace work shares "M", §6.10). */
+export type ExposureFamily = "T" | "I" | "R" | "H" | "M" | "GP" | "TT";
+
+/**
+ * How a rebuild continues the plan it replaces (§8 R-BREAK, R-RACE-1/2; the rule is D, see
+ * continuedPhases in phases.ts):
+ *  - the remaining weeks keep the original phase of their date, taper weeks included (R-RACE-1);
+ *  - `phaseReset` starts the current phase's emphasis over (shift back within the phase);
+ *  - `rebuildWeeks` (0–2) Foundation weeks go in first, taken from the build phases, never the taper;
+ *  - `restart` re-splits the build weeks with the §6.3 table ("treat it as a new plan if the date
+ *    allows", R-BREAK > 28 d), still keeping the taper.
+ * Volume, long runs and sessions are always recomputed from the input's current fitness and history.
+ * New-plan minimums (§6.2 min weeks, entry volume) don't apply; feasibility runs the R-RACE checks.
+ */
+export interface PlanContinuation {
+  /**
+   * Phase of every week of the plan being continued, index 0 = its week 1. Its last week is the race
+   * week (weeks are 7-day blocks ending on race day), so week w of the rebuild is calendar week
+   * `phaseCalendar.length − weeks + w`.
+   */
+  phaseCalendar: readonly Phase[];
+  /** Taper length of the plan being continued, kept as is (§8 R-RACE-1; §6.8 T1 is not re-run). */
+  taperWeeks: number;
+  /** Start the current phase's emphasis sequence over instead of resuming mid-phase. */
+  phaseReset?: boolean;
+  /** Foundation rebuild weeks to insert at the front (0–2), taken from the build phases. */
+  rebuildWeeks?: number;
+  /** Re-split the remaining build weeks with the §6.3 table (taper kept). */
+  restart?: boolean;
+  /** Quality sessions already done per progression family, so sessions keep growing from there. */
+  exposures?: Partial<Record<ExposureFamily, number>>;
+  /** Build weeks since the last cutback in the plan being continued (§6.7 rhythm); default 0. */
+  weeksSinceCutback?: number;
+  /** Why (rule key), for traces, e.g. "R-BREAK:2026-12-31:10". */
+  reason?: string;
 }
 
 /** §6.1 general-fitness request: the race fields are replaced by a GeneralFitnessGoal. */
-export type GeneralFitnessInput = Omit<PlanInput, "raceDate" | "goal"> & { goal: GeneralFitnessGoal };
+export type GeneralFitnessInput = Omit<PlanInput, "raceDate" | "goal" | "continuation"> & { goal: GeneralFitnessGoal };
 
 /** Anything generatePlan accepts. PlanInput (race mode) is unchanged for existing callers. */
 export type PlanRequest = PlanInput | GeneralFitnessInput;

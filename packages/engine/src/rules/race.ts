@@ -9,7 +9,10 @@
  *            goal pace > 2% slower. Offer old_goal / multiplier plus the §6.2 alternatives.
  *   R-RACE-4 < 4 build weeks and no run ≥ 75% of the L1 peak LR in the last 30 days → offer a finish or
  *            run/walk goal, a shorter distance or a later race.
- * Only evaluated after a disruption (break, illness, realignment): an ambitious plan alone is §6.2's job.
+ *   §6.2 goal-time checks also run in R-RACE replans: a goal now > 1.5 VDOT above current fitness
+ *            ("aggressive" or "unrealistic") prompts the same revision (trigger d, D).
+ * Evaluated after a disruption (break, illness, realignment) and after every race-plan rebuild,
+ * which continues the plan's phases and skips the new-plan minimums (feasibility.ts).
  */
 import { addDays, daysBetween } from "../dates.js";
 import { checkFeasibility } from "../feasibility.js";
@@ -62,6 +65,8 @@ export function ruleRace(ctx: RuleContext, r: RaceRuleInput): RuleResult {
   if (lost >= LOST_DAYS_TRIGGER) triggers.push(`a:${lost}d_lost`);
   if (feas.reach.ratio < REACH_WARN) triggers.push(`b:reach${Math.round(feas.reach.ratio * 100)}%`);
   if (slowerPct > MULTIPLIER_TRIGGER_PCT) triggers.push(`c:+${slowerPct.toFixed(1)}%`);
+  const goalOff = feas.reasons.some((x) => x.code === "goal_aggressive" || x.code === "goal_unrealistic");
+  if (goalOff && feas.goalVdotDelta !== undefined) triggers.push(`d:goal+${feas.goalVdotDelta.toFixed(1)}VDOT`);
   out.trace.push(`R-RACE:${triggers.length ? triggers.join(",") : "ok"}`);
 
   const weeksToRace = Math.floor((daysBetween(ctx.today, ctx.raceDate) + 1) / 7);
@@ -91,6 +96,7 @@ export function ruleRace(ctx: RuleContext, r: RaceRuleInput): RuleResult {
   if (lost >= LOST_DAYS_TRIGGER) reasons.push(`you've lost ${lost} days in the last 8 weeks before the race`);
   if (feas.reach.ratio < REACH_WARN) reasons.push(`the longest run you can safely build to is ${Math.round(feas.reach.ratio * 100)}% of this plan's target`);
   if (slowerPct > MULTIPLIER_TRIGGER_PCT) reasons.push(`the time off costs about ${slowerPct.toFixed(1)}% in pace`);
+  if (goalOff && feas.goalVdotDelta !== undefined) reasons.push(`the goal is now ${feas.goalVdotDelta.toFixed(1)} VDOT above your current fitness`);
   if (shortBuild) reasons.push(`only ${Math.max(0, buildWeeks)} build weeks are left`);
   const feely = ctx.brk && ctx.brk.daysOff >= 7 ? " Runners with similar breaks finished about 4–8% slower (Feely 2023)." : "";
   out.proposals.push({

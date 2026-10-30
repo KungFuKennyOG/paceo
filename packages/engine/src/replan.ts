@@ -30,8 +30,11 @@ import {
   type TtPiece,
 } from "./fitness-update.js";
 import { flattenSteps } from "./matching.js";
-import { generatePlan } from "./plan.js";
-import { isGeneralFitness, type Plan, type PlanRequest } from "./plan-types.js";
+import { exposureFamilyOf, generatePlan } from "./plan.js";
+import { isGeneralFitness, type ExposureFamily, type Plan, type PlanContinuation, type PlanInput, type PlanRequest } from "./plan-types.js";
+import { minWeeks } from "./feasibility.js";
+import { cutbackPolicy } from "./volume.js";
+import { BREAK_REBUILD_DAYS, BREAK_RESUME_MAX_DAYS } from "./replan-history.js";
 import { generalFitnessWeeks } from "./general-fitness.js";
 import {
   applyActions,
@@ -128,12 +131,71 @@ function currentLadderStage(ctx: RuleContext): number | undefined {
   return t ? Number(t.slice("§6.9:stage".length)) : undefined;
 }
 
+/** Breaks longer than this restart the interrupted phase's emphasis (shift back within the phase, D). */
+export const PHASE_RESET_BREAK_DAYS = 14;
+/** Breaks longer than this get a second Foundation rebuild week (D; Daniels' table ≈ −11% by 42 d). */
+export const SECOND_REBUILD_WEEK_DAYS = 42;
+
+/**
+ * How a race-plan rebuild continues the current plan (§8 R-RACE-1/2, R-BREAK; the rule is D):
+ *  - always: the remaining weeks keep their phases and the taper keeps its weeks (R-RACE-1).
+ *  - no break, or ≤ 14 days off: resume mid-phase; sessions keep progressing from the exposures
+ *    actually completed, less one per 7 days off (as the run/walk ladder steps back a stage).
+ *  - 15–28 days off: as above, and the interrupted phase starts over (shift back within the phase).
+ *  - > 28 days off (re-test, R-BREAK): "treat it as a new plan if the date allows": when the weeks
+ *    left meet the §6.2 minimum, the build weeks are re-split from FI (restart); otherwise 1 (29–42
+ *    days) or 2 (> 42 days) Foundation rebuild weeks go first, taken from the build phases.
+ *    Progression starts over.
+ *  - the cutback rhythm (§6.7) continues; after a break it restarts (the break was the rest).
+ */
+export function continuationFor(ctx: RuleContext, anchor: string, input: PlanInput, reason?: string): PlanContinuation | undefined {
+  const weeks = ctx.plan.weeks;
+  const at = weeks.findIndex((w) => w.startDate === anchor);
+  if (at < 0) return undefined;
+  const taperWeeks = ctx.plan.summary.taperWeeks > 0 ? ctx.plan.summary.taperWeeks : weeks.filter((w) => w.isTaper).length;
+  if (taperWeeks < 1) return undefined;
+  const c: PlanContinuation = { phaseCalendar: weeks.map((w) => w.phase), taperWeeks };
+  if (reason !== undefined) c.reason = reason;
+  const off = ctx.brk && ctx.brk.daysOff > BREAK_RESUME_MAX_DAYS ? ctx.brk.daysOff : 0;
+
+  const past = weeks.slice(0, at);
+  let since = 0;
+  for (let i = past.length - 1; i >= 0; i--) {
+    const w = past[i]!;
+    if (w.isCutback || w.isLadder || w.isTaper) break;
+    since += 1;
+  }
+  // A cutback or TT week being rebuilt stays the cutback (its TT may already be done, C2).
+  if (weeks[at]!.isCutback && !weeks[at]!.isTaper) since = cutbackPolicy(input).every - 1;
+  c.weeksSinceCutback = off > 0 ? 0 : since;
+
+  if (off > BREAK_REBUILD_DAYS) {
+    if (weeks.length - at >= minWeeks(input)) c.restart = true;
+    else c.rebuildWeeks = off > SECOND_REBUILD_WEEK_DAYS ? 2 : 1;
+    c.phaseReset = true;
+    return c;
+  }
+  if (off > PHASE_RESET_BREAK_DAYS) c.phaseReset = true;
+  const done: Partial<Record<ExposureFamily, number>> = {};
+  for (const w of past.filter((x) => !x.isTaper).flatMap((x) => x.workouts)) {
+    const fam = exposureFamilyOf(w);
+    const m = ctx.matchById.get(w.id);
+    if (fam && m && (m.status === "completed" || m.status === "partial")) done[fam] = (done[fam] ?? 0) + 1;
+  }
+  const back = Math.ceil(off / 7);
+  const exposures: Partial<Record<ExposureFamily, number>> = {};
+  for (const [k, n] of Object.entries(done) as Array<[ExposureFamily, number]>) if (n - back > 0) exposures[k] = n - back;
+  if (Object.keys(exposures).length > 0) c.exposures = exposures;
+  return c;
+}
+
 /**
  * The request for a rebuild: the original request (level, schedule, strength config, locked events,
  * goal) with history-derived volume, longest run and current fitness, starting at the current plan
- * week. Race date unchanged; a general-fitness plan keeps its end date.
+ * week. Race date unchanged; a general-fitness plan keeps its end date. A race plan continues the
+ * current plan's phases and taper (continuationFor) instead of starting a new plan.
  */
-export function deriveInput(ctx: RuleContext, fitness: FitnessState, patches: readonly InputPatch[]): PlanRequest {
+export function deriveInput(ctx: RuleContext, fitness: FitnessState, patches: readonly InputPatch[], reason?: string): PlanRequest {
   const base = ctx.input;
   const anchor = weekContaining(ctx.plan, ctx.editableFrom)?.startDate ?? (ctx.isGeneralFitness ? ctx.editableFrom : blockStart(ctx.editableFrom, ctx.raceDate));
   const lr = longestRun(ctx.runs, ctx.editableFrom, 30);
@@ -163,6 +225,11 @@ export function deriveInput(ctx: RuleContext, fitness: FitnessState, patches: re
     const end = addDays(ctx.raceDate, -1);
     const remaining = Math.max(1, Math.ceil((daysBetween(anchor, end) + 1) / 7));
     out.goal = { ...out.goal, weeks: Math.min(remaining, generalFitnessWeeks({ ...out.goal, weeks: remaining })) };
+    delete (out as { continuation?: unknown }).continuation;
+  } else {
+    const cont = continuationFor(ctx, anchor, out, reason);
+    if (cont) out.continuation = cont;
+    else delete out.continuation;
   }
   return out;
 }
@@ -242,7 +309,7 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
   let derivedInput: PlanRequest | undefined;
   const notes = [...state.plan.summary.notes];
   const canRebuild = !halt && pending.length > 0 && ctx.editableFrom < ctx.raceDate;
-  const derived = deriveInput(ctx, fitness, patches);
+  const derived = deriveInput(ctx, fitness, patches, pending.map((r) => r.key).join(",") || undefined);
   if (canRebuild) {
     // R-BREAK > 28 d: the stale VDOT becomes an estimate, and the rebuild schedules a re-test.
     const reset = pending.find((r) => r.patch.vdotStatus === "estimated" && r.patch.vdot !== undefined);
@@ -274,7 +341,9 @@ export function replan(state: ReplanState, events: readonly CheckInEvent[], toda
 
   // ── R-RACE after a disruption ──────────────────────────────────────────────────────────────
   const illInWindow = [...illnessDates(ctx)].some((d) => d >= addDays(ctx.raceDate, -56));
-  const disruption = ctx.brk ? `${ctx.brk.returnDate}` : illInWindow ? `ill:${ctx.illness.at(-1)?.date ?? today}` : pending.find((r) => r.rule === "R-MISS-4")?.key;
+  // Every race-plan rebuild runs the R-RACE checks too (reachability, goal VDOT delta), since the
+  // §6.2 new-plan minimums no longer apply mid-plan (D).
+  const disruption = ctx.brk ? `${ctx.brk.returnDate}` : illInWindow ? `ill:${ctx.illness.at(-1)?.date ?? today}` : (pending.find((r) => r.rule === "R-MISS-4") ?? (regenerated ? pending[0] : undefined))?.key;
   if (disruption !== undefined && !halt && !ctx.isGeneralFitness && !isGeneralFitness(derived)) {
     const race = ruleRace(ctx, { derived, taperWeeks: plan.summary.taperWeeks, disruptionKey: disruption });
     results.push(race);

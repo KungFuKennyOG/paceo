@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addDays,
   buildWeekTargets,
+  continuedPhases,
   cutbackPolicy,
   danielsPhaseSplit,
   I_REP_WINDOW_S,
@@ -88,6 +89,57 @@ describe("phase lengths (spec §6.3)", () => {
     expect(long.base).toBe(4);
     expect(long.byWeek.slice(0, 5)).toEqual(["BASE", "BASE", "BASE", "BASE", "FI"]);
     expect(long.split).toEqual({ FI: 6, EQ: 6, TQ: 6, FQ: 6 });
+  });
+});
+
+describe("continued phases for a mid-plan rebuild (spec §8 R-RACE-1/2, R-BREAK; D)", () => {
+  // Persona B's 18-week calendar: 4/4/6/4, taper = the last 3 FQ weeks.
+  const cal = planPhases(18, "intermediate").byWeek;
+  const B = (from: number) => continuedPhases(cal, 18 - from + 1, 3, "intermediate", 0);
+
+  it("keeps the phase of every remaining week, taper included, and resumes mid-phase", () => {
+    const p = B(11);
+    expect(p.byWeek).toEqual(cal.slice(10));
+    expect(p.before).toEqual(cal.slice(0, 10));
+    expect(p.rebuildWeeks).toBe(0);
+    expect(p.split).toEqual({ FI: 0, EQ: 0, TQ: 4, FQ: 4 });
+  });
+
+  it("phaseReset starts the current phase over (no prior weeks counted)", () => {
+    expect(continuedPhases(cal, 8, 3, "intermediate", 0, { phaseReset: true }).before).toEqual([]);
+  });
+
+  it("rebuild weeks are FI, taken from the interrupted phase first, never the taper; each phase keeps ≥ 1 week", () => {
+    const one = continuedPhases(cal, 8, 3, "intermediate", 0, { rebuildWeeks: 1 });
+    expect(one.byWeek).toEqual(["FI", "TQ", "TQ", "TQ", "FQ", "FQ", "FQ", "FQ"]);
+    const two = continuedPhases(cal, 5, 3, "intermediate", 0, { rebuildWeeks: 2 }); // weeks 14–18: TQ, FQ + taper
+    expect(two.byWeek).toEqual(cal.slice(13)); // TQ and FQ have 1 build week each: nothing to take
+    expect(two.rebuildWeeks).toBe(0);
+    const capped = continuedPhases(cal, 8, 3, "intermediate", 0, { rebuildWeeks: 5 });
+    expect(capped.rebuildWeeks).toBe(2);
+    expect(capped.byWeek.slice(-3)).toEqual(["FQ", "FQ", "FQ"]);
+  });
+
+  it("restart re-splits the build with the §6.3 table and keeps the taper", () => {
+    const p = continuedPhases(cal, 13, 3, "intermediate", 0, { restart: true });
+    expect(p.byWeek).toEqual([...planPhases(13, "intermediate").byWeek.slice(0, 10), "FQ", "FQ", "FQ"]);
+    expect(p.byWeek[0]).toBe("FI");
+    expect(p.before).toEqual([]);
+  });
+
+  it("run/walk ladder weeks sit in FI", () => {
+    expect(continuedPhases(cal, 8, 3, "beginner", 2).byWeek.slice(0, 3)).toEqual(["FI", "FI", "TQ"]);
+  });
+
+  it("inside the taper every week left is taper", () => {
+    expect(continuedPhases(cal, 2, 3, "intermediate", 0).byWeek).toEqual(["FQ", "FQ"]);
+  });
+
+  it("a continued layout keeps the cutback rhythm (weeks since the last cutback)", () => {
+    const phases: Phase[] = Array(6).fill("TQ");
+    expect(layoutBuildWeeks(6, 3, phases, new Set(), 2)).toEqual(["cutback", "build", "build", "cutback", "build", "build"]);
+    // Fresh: the cutback due in the last build week is dropped (C2; the taper follows).
+    expect(layoutBuildWeeks(6, 3, phases)).toEqual(["build", "build", "cutback", "build", "build", "build"]);
   });
 });
 
